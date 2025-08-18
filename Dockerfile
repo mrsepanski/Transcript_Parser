@@ -1,18 +1,28 @@
-# Dockerfile — ocr fallback Paddle-only (no Tesseract). CPU build.
-FROM python:3.11-slim
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# syntax=docker/dockerfile:1
 
-# System deps for pdf2image and Paddle (no Tesseract)
-RUN apt-get update && apt-get install -y --no-install-recommends     poppler-utils     libgl1     libglib2.0-0     libgomp1     ca-certificates     && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
+
+# System deps:
+# - poppler-utils: needed by pdf2image to convert PDF -> image
+# - libgl1, libglib2.0-0: commonly required by OpenCV (pulled in via paddleocr)
+# - build-essential: for any wheels that need compiling fallback
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    libgl1 \
+    libglib2.0-0 \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY src ./src
-# Copy tests if present (ok if absent)
-COPY tests ./tests
 
-# Install project with Paddle extras
-RUN python -m pip install -U pip && pip install -e ".[dev,paddle]"
+# Copy minimal metadata first to leverage Docker layer caching
+COPY pyproject.toml README.md /app/
+# Copy package source
+COPY transcript_parser /app/transcript_parser
 
-# Default to CLI help
-CMD ["transcript-parser","--help"]
+# Upgrade pip tooling and install project with dev deps (for parity with CI)
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -e ".[dev]"
+
+# Default CLI entrypoint
+ENTRYPOINT ["transcript-parser"]

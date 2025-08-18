@@ -4,15 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "transcript-parser"
-version = "0.5.0"
-description = "Transcript_Parser packaged app with PaddleOCR-only environment (no Tesseract)"
+version = "0.5.1"
+description = "Transcript_Parser packaged app with PaddleOCR fallback enabled by default (no Tesseract)"
 readme = "README.md"
 authors = [{ name = "Mark R. Sepanski" }]
 requires-python = ">=3.10"
 dependencies = [
   "pdfplumber>=0.11.0",
   "pdf2image>=1.16.3",
-  "pillow>=10.3.0"
+  "pillow>=10.3.0",
+  "paddleocr>=2.7.3",
+  "paddlepaddle==2.6.1"
 ]
 
 [project.optional-dependencies]
@@ -23,10 +25,6 @@ dev = [
   "mypy>=1.10.0",
   "pytest>=8.2.0",
   "pytest-cov>=5.0.0"
-]
-paddle = [
-  "paddleocr>=2.7.3",
-  "paddlepaddle==2.6.1"
 ]
 
 [project.scripts]
