@@ -9,12 +9,12 @@ import argparse
 import json
 import re
 import shutil
+from difflib import SequenceMatcher, get_close_matches
 from typing import Dict, List, Optional, Tuple
-from difflib import get_close_matches, SequenceMatcher
 
 import pdfplumber
-from pdf2image import convert_from_path
 from paddleocr import PaddleOCR  # type: ignore
+from pdf2image import convert_from_path
 
 SUBJECT_VARIANTS: Dict[str, List[str]] = {
     "MATH": ["MATH", "MAT", "MA", "MTH"],
@@ -23,7 +23,9 @@ SUBJECT_VARIANTS: Dict[str, List[str]] = {
     "CS": ["CS", "CPSC", "CSCI", "COMP", "COMPSCI", "CSC"],
 }
 
-LETTER_GRADE_PAT = re.compile(r"^(?:[ABCDF][+-]?|P|S|U|CR|NC|NCR|IP|IN|W|WP|WF|AU|NR|H|S/U)$", re.IGNORECASE)
+LETTER_GRADE_PAT = re.compile(
+    r"^(?:[ABCDF][+-]?|P|S|U|CR|NC|NCR|IP|IN|W|WP|WF|AU|NR|H|S/U)$", re.IGNORECASE
+)
 NUMERIC_GRADE_PAT = re.compile(r"^(?:\d{2,3}(?:\.\d+)?)$")
 
 COURSE_PAT = re.compile(r"\b([A-Z]{2,6})\s*[- ]?\s*(\d{2,4}[A-Z]?)\b")
@@ -109,7 +111,9 @@ def _pre_resize_images(images, max_side: int = 3600):
 def _init_paddleocr(lang: str = "en", use_gpu: bool = False):
     # Initialize PaddleOCR (avoid the deprecated angle classification flag entirely).
     try:
-        return PaddleOCR(lang=lang, use_textline_orientation=True, use_gpu=use_gpu, show_log=False)
+        return PaddleOCR(
+            lang=lang, use_textline_orientation=True, use_gpu=use_gpu, show_log=False
+        )
     except TypeError:
         # For older PaddleOCR versions lacking `use_textline_orientation`
         return PaddleOCR(lang=lang, use_gpu=use_gpu, show_log=False)
@@ -138,14 +142,20 @@ def _paddle_text_from_result(res) -> str:
     if not lines and isinstance(res, (list, tuple)):
         try:
             for item in res:
-                if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                if (
+                    isinstance(item, (list, tuple))
+                    and item
+                    and isinstance(item[0], str)
+                ):
                     lines.append(item[0])
         except Exception:
             pass
     return "\n".join(lines)
 
 
-def ocr_pdf_with_paddle(path: str, lang: str = "en", use_gpu: bool = False, dpi: int = 300) -> str:
+def ocr_pdf_with_paddle(
+    path: str, lang: str = "en", use_gpu: bool = False, dpi: int = 300
+) -> str:
     try:
         pages = convert_from_path(path, dpi=dpi)
     except Exception:
@@ -228,9 +238,16 @@ def parse_university(text: str) -> Optional[str]:
             m_iter = list(UNIV_PHRASE_PAT.finditer(line))
             if m_iter:
                 phrase = m_iter[0].group(1)
-                return " ".join(w if (w.isupper() and len(w) <= 3) else w.capitalize() for w in phrase.split())
+                return " ".join(
+                    w if (w.isupper() and len(w) <= 3) else w.capitalize()
+                    for w in phrase.split()
+                )
         for line in scope:
-            if "UNIVERSITY" in line.upper() and line.strip() == line.upper() and len(line.split()) <= 5:
+            if (
+                "UNIVERSITY" in line.upper()
+                and line.strip() == line.upper()
+                and len(line.split()) <= 5
+            ):
                 return line.title().strip()
     return None
 
@@ -324,7 +341,9 @@ def _fuzzy_fix_course_name(name: Optional[str]) -> Optional[str]:
     if not base_norm:
         return name
 
-    candidates = get_close_matches(base_norm.title(), MATH_COURSE_CANON, n=1, cutoff=0.78)
+    candidates = get_close_matches(
+        base_norm.title(), MATH_COURSE_CANON, n=1, cutoff=0.78
+    )
     if candidates:
         return candidates[0] + suffix
 
@@ -382,7 +401,9 @@ def _extract_course_name_and_grade(segment: str) -> Tuple[Optional[str], Optiona
     return name, grade
 
 
-def parse_courses(text: str, subject_variants: Dict[str, List[str]]) -> List[Tuple[str, Optional[str], Optional[str]]]:
+def parse_courses(
+    text: str, subject_variants: Dict[str, List[str]]
+) -> List[Tuple[str, Optional[str], Optional[str]]]:
     lines = text.splitlines()
     results: List[Tuple[str, Optional[str], Optional[str]]] = []
 
@@ -404,7 +425,11 @@ def parse_courses(text: str, subject_variants: Dict[str, List[str]]) -> List[Tup
             num = m.group(2).upper()
             code = f"{subj} {num}"
 
-            seg_end = matches[m_index + 1].start() if m_index + 1 < len(matches) else len(line)
+            seg_end = (
+                matches[m_index + 1].start()
+                if m_index + 1 < len(matches)
+                else len(line)
+            )
             segment = line[m.end() : seg_end]
 
             appended = 0
@@ -456,7 +481,9 @@ def pick_text(pdf_text: str, paddle_text: str) -> Tuple[str, str]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract transcript details (auto OCR; Paddle fallback)")
+    parser = argparse.ArgumentParser(
+        description="Extract transcript details (auto OCR; Paddle fallback)"
+    )
     parser.add_argument("inputs", nargs="+", help="PDF files to process")
     parser.add_argument(
         "--subjects",
@@ -465,9 +492,15 @@ def main():
         help="Subject codes to search (e.g., math stat)",
     )
     parser.add_argument("--out", help="Optional path to write JSON output")
-    parser.add_argument("--ocr-dpi", type=int, default=300, help="OCR DPI for pdf2image (default: 300)")
-    parser.add_argument("--ocr-lang", type=str, default="en", help="PaddleOCR language (default: en)")
-    parser.add_argument("--ocr-gpu", action="store_true", help="Use GPU for PaddleOCR when available")
+    parser.add_argument(
+        "--ocr-dpi", type=int, default=300, help="OCR DPI for pdf2image (default: 300)"
+    )
+    parser.add_argument(
+        "--ocr-lang", type=str, default="en", help="PaddleOCR language (default: en)"
+    )
+    parser.add_argument(
+        "--ocr-gpu", action="store_true", help="Use GPU for PaddleOCR when available"
+    )
     parser.add_argument(
         "--max-pages",
         type=int,
@@ -490,7 +523,9 @@ def main():
     results = []
     for path in args.inputs:
         pdf_text, pdf_pages = extract_pdf_text(path, args.max_pages)
-        paddle_text = ocr_pdf_with_paddle(path, lang=args.ocr_lang, use_gpu=args.ocr_gpu, dpi=args.ocr_dpi)
+        paddle_text = ocr_pdf_with_paddle(
+            path, lang=args.ocr_lang, use_gpu=args.ocr_gpu, dpi=args.ocr_dpi
+        )
 
         chosen_text, chosen_source = pick_text(pdf_text, paddle_text)
 
@@ -499,12 +534,16 @@ def main():
         all_courses = parse_courses(chosen_text, variants)
 
         allowed_prefixes = {v for arr in variants.values() for v in arr}
-        filtered = [(c, n, g) for (c, n, g) in all_courses if c.split()[0] in allowed_prefixes]
+        filtered = [
+            (c, n, g) for (c, n, g) in all_courses if c.split()[0] in allowed_prefixes
+        ]
 
         if args.debug_ocr:
             os.makedirs(args.debug_ocr, exist_ok=True)
             base = os.path.splitext(os.path.basename(path))[0]
-            with open(os.path.join(args.debug_ocr, f"{base}.pdf.txt"), "w", encoding="utf-8") as f:
+            with open(
+                os.path.join(args.debug_ocr, f"{base}.pdf.txt"), "w", encoding="utf-8"
+            ) as f:
                 f.write(pdf_text)
             if paddle_text:
                 with open(
