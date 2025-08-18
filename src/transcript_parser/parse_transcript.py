@@ -39,7 +39,8 @@ NAME_LINE_PATS = [
     re.compile(r"^\s*NAME\s*[:\-–]?\s*(?P<name>.+?)\s*$", re.IGNORECASE),
 ]
 NAME_BETWEEN_PAT = re.compile(
-    r"Name\s*[:\-–]?\s*(?P<name>[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){1,5})", re.IGNORECASE | re.DOTALL
+    r"Name\s*[:\-–]?\s*(?P<name>[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){1,5})",
+    re.IGNORECASE | re.DOTALL,
 )
 
 ROMAN_PAT = re.compile(r"^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$", re.IGNORECASE)
@@ -210,7 +211,9 @@ def parse_name(text: str) -> Optional[str]:
             continue
         if 2 <= len(t.split()) <= 6 and t == t.title():
             if not re.search(
-                r"\b(University|College|Institute|Official|Transcript|Registrar|Campus|Address)\b", t, re.I
+                r"\b(University|College|Institute|Official|Transcript|Registrar|Campus|Address)\b",
+                t,
+                re.I,
             ):
                 nm = _clean_person_tokens(t)
                 if nm:
@@ -326,7 +329,11 @@ def _fuzzy_fix_course_name(name: Optional[str]) -> Optional[str]:
         return candidates[0] + suffix
 
     tokens = base_norm.split()
-    canon_tokens = sorted({t for phrase in MATH_COURSE_CANON for t in phrase.lower().split()}, key=len, reverse=True)
+    canon_tokens = sorted(
+        {t for phrase in MATH_COURSE_CANON for t in phrase.lower().split()},
+        key=len,
+        reverse=True,
+    )
     chosen: List[str] = []
     for tok in tokens:
         best = None
@@ -451,13 +458,28 @@ def pick_text(pdf_text: str, paddle_text: str) -> Tuple[str, str]:
 def main():
     parser = argparse.ArgumentParser(description="Extract transcript details (auto OCR; Paddle fallback)")
     parser.add_argument("inputs", nargs="+", help="PDF files to process")
-    parser.add_argument("--subjects", nargs="+", required=True, help="Subject codes to search (e.g., math stat)")
+    parser.add_argument(
+        "--subjects",
+        nargs="+",
+        required=True,
+        help="Subject codes to search (e.g., math stat)",
+    )
     parser.add_argument("--out", help="Optional path to write JSON output")
     parser.add_argument("--ocr-dpi", type=int, default=300, help="OCR DPI for pdf2image (default: 300)")
     parser.add_argument("--ocr-lang", type=str, default="en", help="PaddleOCR language (default: en)")
     parser.add_argument("--ocr-gpu", action="store_true", help="Use GPU for PaddleOCR when available")
-    parser.add_argument("--max-pages", type=int, default=None, help="Max pages to read for speed (optional)")
-    parser.add_argument("--debug-ocr", type=str, default=None, help="Folder to dump raw OCR texts (optional)")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Max pages to read for speed (optional)",
+    )
+    parser.add_argument(
+        "--debug-ocr",
+        type=str,
+        default=None,
+        help="Folder to dump raw OCR texts (optional)",
+    )
     args = parser.parse_args()
 
     req = {s.upper() for s in args.subjects}
@@ -485,7 +507,11 @@ def main():
             with open(os.path.join(args.debug_ocr, f"{base}.pdf.txt"), "w", encoding="utf-8") as f:
                 f.write(pdf_text)
             if paddle_text:
-                with open(os.path.join(args.debug_ocr, f"{base}.paddle.txt"), "w", encoding="utf-8") as f:
+                with open(
+                    os.path.join(args.debug_ocr, f"{base}.paddle.txt"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
                     f.write(paddle_text)
 
         print(f"Results for {path}:")
