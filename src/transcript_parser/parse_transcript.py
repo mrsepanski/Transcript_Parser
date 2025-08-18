@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("PADDLE_LOG_LEVEL", "ERROR")
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
@@ -19,7 +20,7 @@ SUBJECT_VARIANTS: Dict[str, List[str]] = {
     "MATH": ["MATH", "MAT", "MA", "MTH"],
     "STAT": ["STAT", "STA"],
     "PHYS": ["PHYS", "PHY", "PHYSICS"],
-    "CS":   ["CS", "CPSC", "CSCI", "COMP", "COMPSCI", "CSC"],
+    "CS": ["CS", "CPSC", "CSCI", "COMP", "COMPSCI", "CSC"],
 }
 
 LETTER_GRADE_PAT = re.compile(r"^(?:[ABCDF][+-]?|P|S|U|CR|NC|NCR|IP|IN|W|WP|WF|AU|NR|H|S/U)$", re.IGNORECASE)
@@ -28,36 +29,58 @@ NUMERIC_GRADE_PAT = re.compile(r"^(?:\d{2,3}(?:\.\d+)?)$")
 COURSE_PAT = re.compile(r"\b([A-Z]{2,6})\s*[- ]?\s*(\d{2,4}[A-Z]?)\b")
 COURSE_ANCHORED_PAT = re.compile(r"^\s*([A-Z]{2,6})\s*[- ]?\s*(\d{2,4}[A-Z]?)\b")
 
-UNIV_PHRASE_PAT = re.compile(r"\b([A-Z][A-Za-z&.'-]+(?:\s+[A-Z][A-Za-z&.'-]+){0,5}\s+(?:University|College|Institute))\b")
+UNIV_PHRASE_PAT = re.compile(
+    r"\b([A-Z][A-Za-z&.'-]+(?:\s+[A-Z][A-Za-z&.'-]+){0,5}\s+(?:University|College|Institute))\b"
+)
 
 NAME_LINE_PATS = [
     re.compile(r"^\s*Name\s*[:\-–]?\s*(?P<name>.+?)\s*$", re.IGNORECASE),
     re.compile(r"^\s*Student\s+Name\s*[:\-–]?\s*(?P<name>.+?)\s*$", re.IGNORECASE),
     re.compile(r"^\s*NAME\s*[:\-–]?\s*(?P<name>.+?)\s*$", re.IGNORECASE),
 ]
-NAME_BETWEEN_PAT = re.compile(r"Name\s*[:\-–]?\s*(?P<name>[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){1,5})", re.IGNORECASE | re.DOTALL)
+NAME_BETWEEN_PAT = re.compile(
+    r"Name\s*[:\-–]?\s*(?P<name>[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){1,5})", re.IGNORECASE | re.DOTALL
+)
 
 ROMAN_PAT = re.compile(r"^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$", re.IGNORECASE)
 
 MATH_COURSE_CANON = [
-    "Calculus I","Calculus II","Calculus III",
+    "Calculus I",
+    "Calculus II",
+    "Calculus III",
     "Linear Algebra",
-    "Abstract Algebra","Abstract Algebra I","Abstract Algebra II",
-    "Algebraic Structures","Algebraic Structures I","Algebraic Structures II",
-    "Real Analysis","Real Analysis I","Real Analysis II","Real Variables",
+    "Abstract Algebra",
+    "Abstract Algebra I",
+    "Abstract Algebra II",
+    "Algebraic Structures",
+    "Algebraic Structures I",
+    "Algebraic Structures II",
+    "Real Analysis",
+    "Real Analysis I",
+    "Real Analysis II",
+    "Real Variables",
     "Complex Analysis",
-    "Differential Equations","Ordinary Differential Equations","Partial Differential Equations",
-    "Numerical Methods","Numerical Analysis",
+    "Differential Equations",
+    "Ordinary Differential Equations",
+    "Partial Differential Equations",
+    "Numerical Methods",
+    "Numerical Analysis",
     "Discrete Mathematics",
-    "Transition to Abstract Math","Transition to Advanced Mathematics",
+    "Transition to Abstract Math",
+    "Transition to Advanced Mathematics",
     "Combinatorics",
-    "Probability","Mathematical Probability",
-    "Statistics","Mathematical Statistics",
-    "Topology","Graph Theory",
+    "Probability",
+    "Mathematical Probability",
+    "Statistics",
+    "Mathematical Statistics",
+    "Topology",
+    "Graph Theory",
     "Number Theory",
     "Mathematical Modeling",
-    "Trigonometry","College Algebra"
+    "Trigonometry",
+    "College Algebra",
 ]
+
 
 def extract_pdf_text(path: str, max_pages: Optional[int]) -> Tuple[str, int]:
     chunks: List[str] = []
@@ -66,6 +89,7 @@ def extract_pdf_text(path: str, max_pages: Optional[int]) -> Tuple[str, int]:
         for p in pages:
             chunks.append(p.extract_text() or "")
     return "\n".join(chunks), len(pages)
+
 
 def _pre_resize_images(images, max_side: int = 3600):
     resized = []
@@ -80,6 +104,7 @@ def _pre_resize_images(images, max_side: int = 3600):
             resized.append(im)
     return resized
 
+
 def _init_paddleocr(lang: str = "en", use_gpu: bool = False):
     # Initialize PaddleOCR (avoid the deprecated angle classification flag entirely).
     try:
@@ -92,6 +117,7 @@ def _init_paddleocr(lang: str = "en", use_gpu: bool = False):
             return PaddleOCR(lang=lang, use_gpu=use_gpu, show_log=False)
         except Exception:
             return None
+
 
 def _paddle_text_from_result(res) -> str:
     lines: List[str] = []
@@ -117,6 +143,7 @@ def _paddle_text_from_result(res) -> str:
             pass
     return "\n".join(lines)
 
+
 def ocr_pdf_with_paddle(path: str, lang: str = "en", use_gpu: bool = False, dpi: int = 300) -> str:
     try:
         pages = convert_from_path(path, dpi=dpi)
@@ -137,6 +164,7 @@ def ocr_pdf_with_paddle(path: str, lang: str = "en", use_gpu: bool = False, dpi:
                 res = None
         texts.append(_paddle_text_from_result(res))
     return "\n".join(texts)
+
 
 def _clean_person_tokens(raw: str) -> Optional[str]:
     tokens = raw.split()
@@ -159,8 +187,9 @@ def _clean_person_tokens(raw: str) -> Optional[str]:
         return " ".join(out)
     return None
 
+
 def parse_name(text: str) -> Optional[str]:
-    text_sp = text.replace("\u00A0", " ")
+    text_sp = text.replace("\u00a0", " ")
     lines = [ln for ln in text_sp.splitlines() if ln.strip()]
     top = lines[:150]
     for line in top:
@@ -180,11 +209,14 @@ def parse_name(text: str) -> Optional[str]:
         if not t:
             continue
         if 2 <= len(t.split()) <= 6 and t == t.title():
-            if not re.search(r"\b(University|College|Institute|Official|Transcript|Registrar|Campus|Address)\b", t, re.I):
+            if not re.search(
+                r"\b(University|College|Institute|Official|Transcript|Registrar|Campus|Address)\b", t, re.I
+            ):
                 nm = _clean_person_tokens(t)
                 if nm:
                     return nm
     return None
+
 
 def parse_university(text: str) -> Optional[str]:
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -199,24 +231,55 @@ def parse_university(text: str) -> Optional[str]:
                 return line.title().strip()
     return None
 
+
 def _is_term_token(tok: str) -> bool:
     t = tok.strip().strip(",.;:").lower()
-    if t in {"fall","spring","summer","winter","fa","sp","su","wi"}:
+    if t in {"fall", "spring", "summer", "winter", "fa", "sp", "su", "wi"}:
         return True
-    months = {"january","february","march","april","may","june","july","august","september","october","november","december"}
+    months = {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    }
     if t in months:
         return True
     if re.fullmatch(r"(19|20)\d{2}", t):
         return True
     return False
 
+
 def _is_credit_or_meta(tok: str) -> bool:
     t = tok.strip().strip(",.;:").lower()
-    if t in {"cr","credit","credits","unit","units","hrs","hour","hours","gpa","quality","points","attempted","earned","total"}:
+    if t in {
+        "cr",
+        "credit",
+        "credits",
+        "unit",
+        "units",
+        "hrs",
+        "hour",
+        "hours",
+        "gpa",
+        "quality",
+        "points",
+        "attempted",
+        "earned",
+        "total",
+    }:
         return True
     if re.fullmatch(r"\d+(?:\.\d+)?", t):
         return True
     return False
+
 
 def _detect_grade(tokens: List[str]) -> Optional[str]:
     last: Optional[str] = None
@@ -234,12 +297,14 @@ def _detect_grade(tokens: List[str]) -> Optional[str]:
                 pass
     return last
 
+
 def _normalize_phrase(s: str) -> str:
     s = s.lower()
     s = re.sub(r"[^a-z ]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"(.)\1{2,}", r"\1\1", s)
     return s
+
 
 def _fuzzy_fix_course_name(name: Optional[str]) -> Optional[str]:
     if not name:
@@ -283,6 +348,7 @@ def _fuzzy_fix_course_name(name: Optional[str]) -> Optional[str]:
 
     return name
 
+
 def _extract_course_name_and_grade(segment: str) -> Tuple[Optional[str], Optional[str]]:
     seg = re.sub(r"^[\s\-–—:|.,;/]+", "", segment)
     raw_tokens = seg.split()
@@ -308,6 +374,7 @@ def _extract_course_name_and_grade(segment: str) -> Tuple[Optional[str], Optiona
     name = _fuzzy_fix_course_name(name)
     return name, grade
 
+
 def parse_courses(text: str, subject_variants: Dict[str, List[str]]) -> List[Tuple[str, Optional[str], Optional[str]]]:
     lines = text.splitlines()
     results: List[Tuple[str, Optional[str], Optional[str]]] = []
@@ -327,11 +394,11 @@ def parse_courses(text: str, subject_variants: Dict[str, List[str]]) -> List[Tup
 
         for m_index, m in enumerate(matches):
             subj = m.group(1).upper()
-            num  = m.group(2).upper()
+            num = m.group(2).upper()
             code = f"{subj} {num}"
 
             seg_end = matches[m_index + 1].start() if m_index + 1 < len(matches) else len(line)
-            segment = line[m.end():seg_end]
+            segment = line[m.end() : seg_end]
 
             appended = 0
             j = i + 1
@@ -366,16 +433,20 @@ def parse_courses(text: str, subject_variants: Dict[str, List[str]]) -> List[Tup
             out.append(c)
     return out
 
+
 def pick_text(pdf_text: str, paddle_text: str) -> Tuple[str, str]:
     if len(pdf_text) < 100 and paddle_text:
         return paddle_text, "paddle"
+
     def score(txt: str) -> Tuple[int, int, int]:
         nm = 1 if parse_name(txt) else 0
         crs = len(parse_courses(txt, SUBJECT_VARIANTS))
-        return (nm, crs, min(len(txt)//1000, 50))
+        return (nm, crs, min(len(txt) // 1000, 50))
+
     candidates = [("pdf", pdf_text), ("paddle", paddle_text)]
     best = max(candidates, key=lambda kv: score(kv[1]))
     return best[1], best[0]
+
 
 def main():
     parser = argparse.ArgumentParser(description="Extract transcript details (auto OCR; Paddle fallback)")
@@ -443,13 +514,15 @@ def main():
         }
         print("  Notes: " + "; ".join(f"{k}={v}" for k, v in notes.items()))
 
-        results.append({
-            "file": path,
-            "name": nm,
-            "university": univ,
-            "courses": [{"code": c, "name": n, "grade": g} for c, n, g in filtered],
-            "notes": notes,
-        })
+        results.append(
+            {
+                "file": path,
+                "name": nm,
+                "university": univ,
+                "courses": [{"code": c, "name": n, "grade": g} for c, n, g in filtered],
+                "notes": notes,
+            }
+        )
 
     if args.out:
         try:
@@ -458,6 +531,7 @@ def main():
             print(f"Wrote JSON to {args.out}")
         except Exception as e:
             print(f"Failed to write JSON: {e}")
+
 
 if __name__ == "__main__":
     main()
