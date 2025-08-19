@@ -6,9 +6,7 @@ def greet(name: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Transcript_Parser command-line interface"
-    )
+    parser = argparse.ArgumentParser(description="Transcript_Parser command-line interface")
     parser.add_argument("--name", default="world", help="Name to greet")
     args = parser.parse_args()
     print(greet(args.name))
