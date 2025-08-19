@@ -23,7 +23,7 @@ jobs:
           black --check --line-length 120 .
       - name: Lint (ruff check)
         run: |
-          ruff check --select E,F,I,UP --ignore E203,E501 --line-length 120 .
+          ruff check --select E,F,I,UP --ignore E203,E501,UP038 --line-length 120 .
 
   typecheck:
     name: CI / typecheck
@@ -43,16 +43,13 @@ jobs:
           mypy --ignore-missing-imports --pretty src
 
   tests:
-    name: CI / tests
+    name: CI / tests (3.11)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.11'
       - name: System deps (poppler for pdf2image)
         run: |
           sudo apt-get update
