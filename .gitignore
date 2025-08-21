@@ -75,6 +75,8 @@ Thumbs.db
 *.pid
 *.log
 docker-compose.override.yml
+
+# Data / output
 /data/
 *.pdf
 *.json
@@ -84,4 +86,9 @@ docker-compose.override.yml
 Test_Files/
 ocr_debug/
 out.json
-git_files.zip
+
+# Archives and junk
+*.zip
+*.tar.gz
+*.tgz
+*.7z
