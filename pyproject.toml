@@ -1,63 +1,35 @@
 [build-system]
-requires = ["hatchling>=1.24"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "transcript-parser"
-version = "0.5.3"
-description = "Transcript_Parser packaged app with PaddleOCR fallback enabled by default (no Tesseract)"
+name = "transcript_parser"
+version = "0.1.0"
+description = "Transcript parsing utilities"
 readme = "README.md"
-authors = [{ name = "Mark R. Sepanski" }]
-requires-python = ">=3.10"
-dependencies = [
-  "pdfplumber>=0.11.0",
-  "pdf2image>=1.16.3",
-  "pillow>=10.3.0",
-  "paddleocr>=2.7.3",
-  "paddlepaddle==2.6.1"
-]
+requires-python = ">=3.11"
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
-  "black>=24.3.0",
-  "isort>=5.13.0",
-  "autoflake>=2.3.1",
-  "mypy>=1.10.0",
-  "pytest>=8.2.0",
-  "pytest-cov>=5.0.0",
-  "pre-commit>=3.7.0",
-  "reportlab>=4.0.0"
+    "pytest",
+    "pre-commit",
+    "black",
+    "ruff",
+    "isort",
+    "mypy",
+    "autoflake",
 ]
 
-[project.scripts]
-transcript-parser = "transcript_parser.parse_transcript:main"
-
-[tool.isort]
-profile = "black"
-
-[tool.black]
-line-length = 88
-target-version = ["py310","py311","py312"]
-
-[tool.mypy]
-python_version = "3.12"
-warn_unused_configs = true
-disallow_untyped_defs = false
-check_untyped_defs = true
-ignore_missing_imports = true
-
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-ra"
 testpaths = ["tests"]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/transcript_parser"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "src/transcript_parser/**",
-  "pyproject.toml",
-  "README.md",
-  "LICENSE*",
-  "tests/**"
+pythonpath = ["src"]
+# Silence noisy third‑party deprecation warnings so smoke tests stay readable.
+# These are from external libs (protobuf, paddle/paddlex, astor) and not in our code.
+filterwarnings = [
+  'ignore:datetime\.datetime\.utcfromtimestamp\(\) is deprecated.*:DeprecationWarning:google\.protobuf',
+  'ignore:Call to deprecated create function .*:DeprecationWarning:paddle\..*',
+  'ignore:Call to deprecated create function .*:DeprecationWarning:paddle\.base\.proto\..*',
+  'ignore:ast\.Num is deprecated.*:DeprecationWarning:astor\.op_util',
 ]
