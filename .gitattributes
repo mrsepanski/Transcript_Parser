@@ -1,17 +1,31 @@
-* text=auto
-*.py   text eol=lf
-*.toml text eol=lf
-*.md   text eol=lf
-*.yml  text eol=lf
-*.yaml text eol=lf
+# Normalize text files to LF in the repo
+* text=auto eol=lf
+
+# Common text files
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.rst   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.ini   text eol=lf
+*.cfg   text eol=lf
 Dockerfile text eol=lf
-*.sh   text eol=lf
-*.ps1  text eol=crlf
-*.bat  text eol=crlf
-*.cmd  text eol=crlf
+.gitattributes text eol=lf
+.editorconfig text eol=lf
+.sh     text eol=lf
+
+# Keep native CRLF for Windows-only scripts
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Binary files
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
 *.pdf binary
 *.zip binary
+*.svg binary
