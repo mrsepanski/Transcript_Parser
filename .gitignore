@@ -84,3 +84,4 @@ docker-compose.override.yml
 Test_Files/
 ocr_debug/
 out.json
+git_files.zip
