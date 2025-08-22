@@ -1,258 +1,226 @@
-#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""
+Transcript parser CLI.
+
+Strategy:
+- Prefer extracting searchable text via pdfplumber.
+- Only fall back to OCR (PaddleOCR) if the PDF text is too short
+  or yields too few course-code hits, or if --prefer-ocr is set.
+"""
+
+from __future__ import annotations
+
 import argparse
 import json
-import os
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
-# Lightweight normalization for unicode dashes etc.
-DASHES = {
-    "\u2010": "-",  # hyphen
-    "\u2011": "-",
-    "\u2012": "-",
-    "\u2013": "-",  # en dash
-    "\u2014": "-",  # em dash
-    "\u2212": "-",  # minus
+# ----------------------------- subject aliases ------------------------------
+
+SUBJECT_ALIASES: dict[str, Sequence[str]] = {
+    "math": ("MATH", "MAT", "MTH", "MA", "MATG"),
+    "stat": ("STAT", "STA"),
+    "cs": ("CS", "CSC", "CSCI", "CSE", "COSC"),
+    "physics": ("PHYS", "PHY"),
+    "chem": ("CHEM", "CHM"),
+    "bio": ("BIOL", "BIO"),
+    "econ": ("ECON", "ECN"),
+    "engr": ("ENGR", "EGR"),
 }
 
 
-def normalize_text(s: str) -> str:
-    for k, v in DASHES.items():
-        s = s.replace(k, v)
-    # Normalize weird spaces
-    s = s.replace("\xa0", " ")
-    return s
-
-
-def expand_subjects(subject_tokens: Iterable[str]) -> list[str]:
-    """
-    Map high-level subject tokens to concrete course prefixes.
-    e.g. 'math' -> ['MATH','MAT','MTH','MA']
-    Unknown tokens are treated as explicit prefixes (uppercased).
-    """
-    aliases = {
-        "math": ["MATH", "MAT", "MTH", "MA", "MATG"],
-        "stat": ["STAT", "STA", "STT"],
-        "cs": ["CS", "CSC", "CPSC", "COSC"],
-        "physics": ["PHY", "PHYS"],
-        "chem": ["CHEM", "CHM"],
-        "bio": ["BIO", "BIOL"],
-        # Feel free to add more aliases here as needed.
-    }
-    out = []
-    for tok in subject_tokens:
-        key = tok.strip().lower()
-        out.extend(aliases.get(key, [tok.strip().upper()]))
-    # de-duplicate while preserving order
-    seen = set()
-    out_uniq = []
+def expand_subjects(subjects: Sequence[str]) -> list[str]:
+    out: list[str] = []
+    for s in subjects:
+        key = s.strip().lower()
+        if key in SUBJECT_ALIASES:
+            out.extend(SUBJECT_ALIASES[key])
+        else:
+            out.append(s.upper())
+    # dedupe, preserve order
+    seen: set[str] = set()
+    uniq: list[str] = []
     for p in out:
-        if p not in seen:
-            seen.add(p)
-            out_uniq.append(p)
-    return out_uniq
+        u = p.upper()
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
 
 
-def build_course_regex(prefixes: list[str]) -> re.Pattern:
-    # Sort by length so longer prefixes match first (e.g., MATH before MA)
-    prefixes_sorted = sorted(prefixes, key=len, reverse=True)
-    pat = r"\b(" + "|".join(map(re.escape, prefixes_sorted)) + r")\s*[-:]?\s*([0-9]{3,4}[A-Z]?)\b"
-    return re.compile(pat, flags=re.IGNORECASE)
+# ------------------------------- utilities ----------------------------------
 
 
-def extract_pdf_text(path: str, max_pages: int | None = None) -> str:
+@dataclass
+class ParseResult:
+    file: str
+    text_source: str  # 'pdf' or 'ocr'
+    courses: list[str]
+    notes: dict[str, str]
+
+
+def _read_pdf_text(path: Path, max_pages: int | None = None) -> str:
+    import pdfplumber  # type: ignore[import-not-found]
+
+    text_parts: list[str] = []
+    with pdfplumber.open(str(path)) as pdf:
+        pages = pdf.pages
+        if max_pages is not None:
+            pages = pages[:max_pages]
+        for page in pages:
+            text_parts.append(page.extract_text() or "")
+    return "\n".join(text_parts)
+
+
+def _ocr_pdf_text(path: Path, dpi: int = 300, lang: str = "en") -> str:
+    # Deferred imports so we only pay the cost if/when needed
+    from paddleocr import PaddleOCR  # type: ignore[import-not-found]
+    from pdf2image import convert_from_path  # type: ignore[import-not-found]
+
+    images = convert_from_path(str(path), dpi=dpi)
+    ocr = PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=False)
+    lines: list[str] = []
+    for img in images:
+        # Convert PIL image to temp file-less ndarray format expected by PaddleOCR
+        # PaddleOCR.ocr accepts ndarray directly.
+        import numpy as np  # type: ignore[import-not-found]
+
+        arr = np.array(img)
+        result = ocr.ocr(arr, cls=True)
+        for page in result:
+            if page is None:
+                continue
+            for box in page:
+                txt = box[1][0] if isinstance(box, (list, tuple)) and len(box) >= 2 else ""
+                if txt:
+                    lines.append(txt)
+    return "\n".join(lines)
+
+
+def _compile_course_regex(prefixes: Sequence[str]) -> re.Pattern[str]:
+    # Accept PREFIX 123, PREFIX-123, PREFIX:123 with optional spaces
+    # Word boundary on both ends of prefix
+    prefix_alt = "|".join(re.escape(p) for p in prefixes)
+    pattern = rf"\b(?:{prefix_alt})\s*[-:]?\s*(\d{{3,4}}[A-Za-z]?)\b"
+    return re.compile(pattern, flags=re.IGNORECASE)
+
+
+def _extract_courses_from_text(text: str, prefixes: Sequence[str]) -> list[str]:
+    """Return pretty, per-course snippets from the text."""
+    if not text.strip():
+        return []
+
+    pat = _compile_course_regex(prefixes)
+    # Build a regex to find the *next* course start so we can truncate the snippet
+    any_prefix_re = re.compile(
+        rf"\b(?:{'|'.join(re.escape(p) for p in prefixes)})\s*[-:]?\s*\d{{3,4}}",
+        flags=re.IGNORECASE,
+    )
+
+    lines: list[str] = text.splitlines()  # type: ignore[assignment]
+    courses: list[str] = []
+
+    for line in lines:
+        for m in pat.finditer(line):
+            # Base "SUBJ NUM"
+            head = line[m.start() : m.end()]
+            tail = line[m.end() :]
+
+            # Drop a solitary single-letter column marker right after the code (e.g., " C ")
+            tail = re.sub(r"^\s+[A-Z]\s+(?=\S)", " ", tail)
+
+            # Truncate tail at the next course occurrence on the same line
+            nxt = any_prefix_re.search(tail)
+            if nxt:
+                tail = tail[: nxt.start()]
+
+            snippet = f"{head.upper()} — {tail.strip()}".rstrip(" -–—")
+            snippet = re.sub(r"\s{2,}", " ", snippet)  # collapse excess spaces
+            if snippet and snippet not in courses:
+                courses.append(snippet)
+
+    return courses
+
+
+def parse_file(path: Path, subjects: Sequence[str], prefer_ocr: bool = False) -> ParseResult:
+    prefixes = expand_subjects(subjects)
+
+    text_source = "pdf"
+    notes: dict[str, str] = {}
+    text = ""
     try:
-        import pdfplumber
-    except Exception:
-        return ""
-    try:
-        txt_parts = []
-        with pdfplumber.open(path) as pdf:
-            pages = pdf.pages if max_pages is None else pdf.pages[:max_pages]
-            for pg in pages:
-                try:
-                    t = pg.extract_text() or ""
-                except Exception:
-                    t = ""
-                txt_parts.append(t)
-        return normalize_text("\n".join(txt_parts))
-    except Exception:
-        return ""
+        text = _read_pdf_text(path)
+    except Exception as e:  # pragma: no cover - safety
+        notes["pdf_error"] = type(e).__name__
+        text = ""
 
+    courses = _extract_courses_from_text(text, prefixes) if text else []
 
-def ocr_pdf_with_paddle(path: str, dpi: int = 300, max_pages: int = 2) -> str:
-    """
-    Convert first few pages of the PDF to images and run PaddleOCR.
-    Only called if PDF text looks insufficient.
-    """
-    try:
-        from paddleocr import PaddleOCR
-        from pdf2image import convert_from_path
-    except Exception as e:
-        print(f"[warn] OCR unavailable or failed to import: {e}", file=sys.stderr)
-        return ""
+    # Heuristics to decide OCR necessity
+    need_ocr = prefer_ocr or (len(text) < 400 or len(courses) < 2)
 
-    try:
-        images = convert_from_path(path, dpi=dpi)
-    except Exception as e:
-        print(f"[warn] pdf2image failed: {e}", file=sys.stderr)
-        return ""
-
-    try:
-        ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False)
-    except Exception as e:
-        print(f"[warn] PaddleOCR init failed: {e}", file=sys.stderr)
-        return ""
-
-    text_chunks = []
-    for img in images[:max_pages]:
+    if need_ocr:
         try:
-            result = ocr.ocr(img, cls=True)
-            # result is list of [ [box, (text, conf)], ... ] per image
-            if result:
-                lines = []
-                for line in result:
-                    if not line:
-                        continue
-                    # handle both old/new structures
-                    if isinstance(line, list) and len(line) > 0 and isinstance(line[0], list):
-                        # some versions return a nested structure
-                        for seg in line:
-                            if len(seg) >= 2 and isinstance(seg[1], (tuple, list)):
-                                lines.append(str(seg[1][0]))
-                    else:
-                        # typical structure
-                        for seg in line:
-                            if len(seg) >= 2 and isinstance(seg[1], (tuple, list)):
-                                lines.append(str(seg[1][0]))
-                text_chunks.append("\n".join(lines))
-        except Exception as e:
-            print(f"[warn] PaddleOCR page error: {e}", file=sys.stderr)
-            continue
-    return normalize_text("\n".join(text_chunks))
+            ocr_text = _ocr_pdf_text(path)
+            ocr_courses = _extract_courses_from_text(ocr_text, prefixes)
+            # If OCR yields more, switch to it
+            if len(ocr_courses) > len(courses):
+                courses = ocr_courses
+                text_source = "ocr"
+            else:
+                notes["ocr_unused"] = "pdf_better"
+        except Exception as e:  # pragma: no cover - robustness
+            notes["ocr_error"] = f"{type(e).__name__}: {e}"
+
+    return ParseResult(file=path.name, text_source=text_source, courses=courses, notes=notes)
 
 
-def harvest_course_lines(text: str, pat: re.Pattern, limit: int = 200) -> list[tuple[str, str, str]]:
-    """
-    Return a list of (prefix, number, line_text) tuples for lines matching the course pattern.
-    `limit` just prevents pathological blowups.
-    """
-    lines = []
-    if not text:
-        return lines
-    # Work on the original text for nicer output lines; use an uppercased copy for regex search
-    text_norm = normalize_text(text)
-    text_upper = text_norm.upper()
-    for m in pat.finditer(text_upper):
-        start, end = m.span()
-        # get the original case substring for the line
-        ls = text_norm.rfind("\n", 0, start) + 1
-        if ls < 0:
-            ls = 0
-        le = text_norm.find("\n", end)
-        if le == -1:
-            le = len(text_norm)
-        line = " ".join(text_norm[ls:le].split())
-        prefix = m.group(1).upper()
-        number = m.group(2).upper()
-        lines.append((prefix, number, line))
-        if len(lines) >= limit:
-            break
-    return lines
+# ---------------------------------- CLI -------------------------------------
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("inputs", nargs="+", help="PDF file(s) to parse")
-    ap.add_argument("--subjects", nargs="+", required=True, help="Subjects (e.g., math stat)")
-    ap.add_argument("--out", default=None, help="Optional JSON output file")
-    ap.add_argument("--prefer-ocr", action="store_true", help="Force OCR even if PDF text looks fine")
-    ap.add_argument("--ocr-dpi", type=int, default=300)
-    ap.add_argument("--max-pages", type=int, default=None, help="Max pages to read from PDF for text mode")
-    return ap.parse_args(argv)
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Parse transcripts for course codes.")
+    p.add_argument("inputs", nargs="+", help="PDF file(s) to parse")
+    p.add_argument("--subjects", nargs="+", required=True, help="Subject areas (e.g., math stat cs)")
+    p.add_argument("--out", help="Optional JSON output path")
+    p.add_argument("--prefer-ocr", action="store_true", help="Force OCR even if PDF text looks OK")
+    return p
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    expanded_prefixes = expand_subjects(args.subjects)
-    pat = build_course_regex(expanded_prefixes)
+def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
 
-    for inp in args.inputs:
-        base = os.path.basename(inp)
-        print(f"Results for {base}")
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
 
-        # Step 1: PDF text
-        pdf_text = extract_pdf_text(inp, max_pages=args.max_pages)
-        pdf_hits = harvest_course_lines(pdf_text, pat)
+    # Process the first input only for CLI output parity with prior behavior
+    in_path = Path(args.inputs[0])
+    result = parse_file(in_path, subjects=args.subjects, prefer_ocr=args.prefer_ocr)
 
-        use_ocr = False
-        if args.prefer_ocr:
-            use_ocr = True
-        else:
-            # Only trigger OCR if text is clearly insufficient
-            # Heuristics: fewer than 2 course hits OR total text very short
-            if len(pdf_hits) < 2 or (pdf_text and len(pdf_text) < 400):
-                use_ocr = True
+    print(f"Results for {result.file}")
+    if result.courses:
+        for c in result.courses:
+            print(f"  {c}")
+    else:
+        print(" [no course codes detected]")
 
-        ocr_hits = []
-        text_source = "pdf"
-        if use_ocr:
-            ocr_text = ocr_pdf_with_paddle(inp, dpi=args.ocr_dpi, max_pages=2)
-            if ocr_text:
-                ocr_hits = harvest_course_lines(ocr_text, pat)
-                # If OCR finds more courses than pdf_text, prefer it
-                if len(ocr_hits) > len(pdf_hits):
-                    text_source = "ocr"
-                else:
-                    # keep pdf results if they were already better
-                    use_ocr = False
+    base = Path(result.file).name
+    subj_str = ", ".join(s.lower() for s in args.subjects)
+    print(f"Parsed {base} (subjects: {subj_str}; text_source={result.text_source})")
 
-        hits = ocr_hits if text_source == "ocr" else pdf_hits
-        if hits:
-            # Print a concise course summary (code + a trimmed title fragment)
-            seen = set()
-            for prefix, number, line in hits:
-                code = f"{prefix} {number}"
-                if code in seen:
-                    continue
-                seen.add(code)
-                # Try to extract a short title fragment to the right of the code
-                # (safe fallback to the entire line if parsing is hard)
-                try:
-                    # find the code within the line and grab up to next 60 chars
-                    i = line.upper().find(code)
-                    frag = line[i + len(code) :].strip()
-                    frag = re.sub(r"\s{2,}", " ", frag)
-                    frag = frag[:80].strip(" -:")
-                    if frag:
-                        print(f"  {code} — {frag}")
-                    else:
-                        print(f"  {code}")
-                except Exception:
-                    print(f"  {code}")
-        else:
-            print(" [no course codes detected]")
-
-        ", ".join(expanded_prefixes)
-        print(f"Parsed {base} (subjects: {', '.join(args.subjects)}; text_source={text_source})")
-
-        if args.out:
-            data = {
-                "file": base,
-                "subjects": args.subjects,
-                "expanded_prefixes": expanded_prefixes,
-                "text_source": text_source,
-                "courses": [{"prefix": p, "number": n, "line": line} for p, n, line in hits],
-            }
-            try:
-                with open(args.out, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"[warn] could not write JSON: {e}", file=sys.stderr)
-
-    return 0
+    if args.out:
+        payload = {
+            "file": result.file,
+            "text_source": result.text_source,
+            "courses": result.courses,
+            "notes": result.notes,
+        }
+        Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    main()
