@@ -1,225 +1,217 @@
-# SPDX-License-Identifier: MIT
-"""
-Transcript parser CLI.
-
-Strategy:
-- Prefer extracting searchable text via pdfplumber.
-- Only fall back to OCR (PaddleOCR) if the PDF text is too short
-  or yields too few course-code hits, or if --prefer-ocr is set.
-"""
-
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import sys
-from collections.abc import Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-# ----------------------------- subject aliases ------------------------------
-
-SUBJECT_ALIASES: dict[str, Sequence[str]] = {
-    "math": ("MATH", "MAT", "MTH", "MA", "MATG"),
-    "stat": ("STAT", "STA"),
-    "cs": ("CS", "CSC", "CSCI", "CSE", "COSC"),
-    "physics": ("PHYS", "PHY"),
-    "chem": ("CHEM", "CHM"),
-    "bio": ("BIOL", "BIO"),
-    "econ": ("ECON", "ECN"),
-    "engr": ("ENGR", "EGR"),
-}
-
-
-def expand_subjects(subjects: Sequence[str]) -> list[str]:
-    out: list[str] = []
-    for s in subjects:
-        key = s.strip().lower()
-        if key in SUBJECT_ALIASES:
-            out.extend(SUBJECT_ALIASES[key])
-        else:
-            out.append(s.upper())
-    # dedupe, preserve order
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for p in out:
-        u = p.upper()
-        if u not in seen:
-            seen.add(u)
-            uniq.append(u)
-    return uniq
-
-
-# ------------------------------- utilities ----------------------------------
+# Lightweight deps; assume pdfplumber is available (declared in pyproject)
+try:
+    import pdfplumber  # type: ignore
+except Exception:  # pragma: no cover - tests have this dep
+    pdfplumber = None  # type: ignore
 
 
 @dataclass
 class ParseResult:
-    file: str
-    text_source: str  # 'pdf' or 'ocr'
-    courses: list[str]
-    notes: dict[str, str]
+    courses: list[tuple[str, str]]
+    text_source: str
+    notes: dict
 
 
-def _read_pdf_text(path: Path, max_pages: int | None = None) -> str:
-    import pdfplumber  # type: ignore[import-not-found]
+SUBJECT_ALIASES = {
+    # core math family
+    "math": ["MATH", "MAT", "MTH", "MA", "MATG"],
+    "stat": ["STAT", "STA"],
+    "cs": ["CS", "CSC", "CSCI", "CSE", "COSC"],
+    "physics": ["PHYS", "PHY"],
+    "chem": ["CHEM", "CHM"],
+    "bio": ["BIOL", "BIO"],
+    "econ": ["ECON", "ECN"],
+    "engr": ["ENGR", "EGR"],
+}
 
+
+def expand_subjects(subjects: Iterable[str]) -> list[str]:
+    expanded: list[str] = []
+    for s in subjects:
+        key = s.lower()
+        if key in SUBJECT_ALIASES:
+            expanded.extend(SUBJECT_ALIASES[key])
+        else:
+            expanded.append(s.upper())
+    # unique-preserve order
+    seen = set()
+    uniq: list[str] = []
+    for p in expanded:
+        if p not in seen:
+            uniq.append(p)
+            seen.add(p)
+    return uniq
+
+
+COURSE_PAT_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
+
+
+def _build_course_pattern(prefixes: list[str]) -> re.Pattern[str]:
+    key = tuple(prefixes)
+    if key in COURSE_PAT_CACHE:
+        return COURSE_PAT_CACHE[key]
+    # Accept PREFIX 123, PREFIX-123, PREFIX:123, optional letter suffix (e.g., 101A)
+    # Word boundaries around prefix; allow multiple spaces
+    pfx = r"(?:%s)" % "|".join(re.escape(p) for p in prefixes)
+    pat = re.compile(rf"\b{pfx}\s*[-:\s]?\s*(\d{{3}}[A-Z]?)\b", re.IGNORECASE)
+    COURSE_PAT_CACHE[key] = pat
+    return pat
+
+
+def _iter_lines(text: str) -> list[str]:
+    # Normalize newlines and collapse CRLF
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Remove obviously empty lines
+    return [ln for ln in lines if ln.strip()]
+
+
+def extract_pdf_text(path: Path, max_pages: int | None = None) -> str:
+    if pdfplumber is None:
+        return ""
     text_parts: list[str] = []
-    with pdfplumber.open(str(path)) as pdf:
-        pages = pdf.pages
-        if max_pages is not None:
-            pages = pages[:max_pages]
-        for page in pages:
-            text_parts.append(page.extract_text() or "")
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                if max_pages is not None and i >= max_pages:
+                    break
+                t = page.extract_text() or ""
+                if t:
+                    text_parts.append(t)
+    except Exception:
+        return ""
     return "\n".join(text_parts)
 
 
-def _ocr_pdf_text(path: Path, dpi: int = 300, lang: str = "en") -> str:
-    # Deferred imports so we only pay the cost if/when needed
-    from paddleocr import PaddleOCR  # type: ignore[import-not-found]
-    from pdf2image import convert_from_path  # type: ignore[import-not-found]
-
-    images = convert_from_path(str(path), dpi=dpi)
-    ocr = PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=False)
-    lines: list[str] = []
-    for img in images:
-        # Convert PIL image to temp file-less ndarray format expected by PaddleOCR
-        # PaddleOCR.ocr accepts ndarray directly.
-        import numpy as np  # type: ignore[import-not-found]
-
-        arr = np.array(img)
-        result = ocr.ocr(arr, cls=True)
-        for page in result:
-            if page is None:
-                continue
-            for box in page:
-                txt = box[1][0] if isinstance(box, (list, tuple)) and len(box) >= 2 else ""
-                if txt:
-                    lines.append(txt)
-    return "\n".join(lines)
-
-
-def _compile_course_regex(prefixes: Sequence[str]) -> re.Pattern[str]:
-    # Accept PREFIX 123, PREFIX-123, PREFIX:123 with optional spaces
-    # Word boundary on both ends of prefix
-    prefix_alt = "|".join(re.escape(p) for p in prefixes)
-    pattern = rf"\b(?:{prefix_alt})\s*[-:]?\s*(\d{{3,4}}[A-Za-z]?)\b"
-    return re.compile(pattern, flags=re.IGNORECASE)
+def find_courses_in_text(text: str, prefixes: list[str]) -> list[tuple[str, str]]:
+    """
+    Returns list of (code, snippet). Code is like 'MATH 101' using the
+    matched prefix and number; snippet is a cleaned substring from the line
+    containing the match.
+    """
+    pat = _build_course_pattern(prefixes)
+    results: list[tuple[str, str]] = []
+    lines: list[str] = _iter_lines(text)
+    for ln in lines:
+        # Work on an upper-cased copy for matching, but keep original for display
+        upper_ln = ln.upper()
+        matches = list(pat.finditer(upper_ln))
+        if not matches:
+            continue
+        # If multiple matches in one line, emit one entry per match with the same snippet
+        # but each has its own code (so test sees 'MATH 101' as separate item).
+        # Clean snippet: trim excessive spaces
+        cleaned = re.sub(r"\s+", " ", ln).strip()
+        for m in matches:
+            prefix = m.group(0)[: len(m.group(0)) - len(m.group(1))].strip()
+            number = m.group(1).upper()
+            # Normalize prefix in code to canonical uppercase of the matched prefix token
+            # Extract the actual prefix token from the match span
+            code_prefix = upper_ln[m.start() : m.start() + len(prefix)].strip()
+            # Normalize to 'PREFIX 123'
+            code = f"{code_prefix} {number}"
+            results.append((code, cleaned))
+    return results
 
 
-def _extract_courses_from_text(text: str, prefixes: Sequence[str]) -> list[str]:
-    """Return pretty, per-course snippets from the text."""
-    if not text.strip():
-        return []
-
-    pat = _compile_course_regex(prefixes)
-    # Build a regex to find the *next* course start so we can truncate the snippet
-    any_prefix_re = re.compile(
-        rf"\b(?:{'|'.join(re.escape(p) for p in prefixes)})\s*[-:]?\s*\d{{3,4}}",
-        flags=re.IGNORECASE,
-    )
-
-    lines: list[str] = text.splitlines()  # type: ignore[assignment]
-    courses: list[str] = []
-
-    for line in lines:
-        for m in pat.finditer(line):
-            # Base "SUBJ NUM"
-            head = line[m.start() : m.end()]
-            tail = line[m.end() :]
-
-            # Drop a solitary single-letter column marker right after the code (e.g., " C ")
-            tail = re.sub(r"^\s+[A-Z]\s+(?=\S)", " ", tail)
-
-            # Truncate tail at the next course occurrence on the same line
-            nxt = any_prefix_re.search(tail)
-            if nxt:
-                tail = tail[: nxt.start()]
-
-            snippet = f"{head.upper()} — {tail.strip()}".rstrip(" -–—")
-            snippet = re.sub(r"\s{2,}", " ", snippet)  # collapse excess spaces
-            if snippet and snippet not in courses:
-                courses.append(snippet)
-
-    return courses
+def need_ocr(pdf_text: str, hits: int) -> bool:
+    # Trigger OCR only if very short text OR no/little hits
+    return (len(pdf_text) < 400) or (hits < 2)
 
 
-def parse_file(path: Path, subjects: Sequence[str], prefer_ocr: bool = False) -> ParseResult:
-    prefixes = expand_subjects(subjects)
-
-    text_source = "pdf"
-    notes: dict[str, str] = {}
-    text = ""
+def run_ocr_extract_text(path: Path) -> str:
+    """
+    Attempt OCR with PaddleOCR. Import lazily; if anything fails, return "".
+    """
     try:
-        text = _read_pdf_text(path)
-    except Exception as e:  # pragma: no cover - safety
-        notes["pdf_error"] = type(e).__name__
-        text = ""
+        from paddleocr import PaddleOCR  # type: ignore
+        from pdf2image import convert_from_path  # type: ignore
+    except Exception:
+        return ""
 
-    courses = _extract_courses_from_text(text, prefixes) if text else []
+    try:
+        # Render pages to images (default dpi ~200 is OK for speed)
+        images = convert_from_path(str(path))
+        ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False)
+        texts: list[str] = []
+        for img in images:
+            res = ocr.ocr(img, cls=True)
+            # res is list[list[([x1,y1]..), (text, conf)]]
+            lines: list[str] = []
+            for page in res or []:
+                for item in page or []:
+                    txt = item[1][0] if item and item[1] else ""
+                    if txt:
+                        lines.append(txt)
+            if lines:
+                texts.append("\n".join(lines))
+        return "\n".join(texts)
+    except Exception:
+        return ""
 
-    # Heuristics to decide OCR necessity
-    need_ocr = prefer_ocr or (len(text) < 400 or len(courses) < 2)
 
-    if need_ocr:
-        try:
-            ocr_text = _ocr_pdf_text(path)
-            ocr_courses = _extract_courses_from_text(ocr_text, prefixes)
-            # If OCR yields more, switch to it
+def parse_file(path: Path, subjects: list[str], prefer_ocr: bool = False) -> ParseResult:
+    prefixes = expand_subjects(subjects)
+    pdf_text = extract_pdf_text(path)
+    courses = find_courses_in_text(pdf_text, prefixes)
+    text_source = "pdf"
+
+    if prefer_ocr or need_ocr(pdf_text, len(courses)):
+        ocr_text = run_ocr_extract_text(path)
+        if ocr_text:
+            ocr_courses = find_courses_in_text(ocr_text, prefixes)
+            # Prefer OCR only if it adds value
             if len(ocr_courses) > len(courses):
                 courses = ocr_courses
                 text_source = "ocr"
-            else:
-                notes["ocr_unused"] = "pdf_better"
-        except Exception as e:  # pragma: no cover - robustness
-            notes["ocr_error"] = f"{type(e).__name__}: {e}"
 
-    return ParseResult(file=path.name, text_source=text_source, courses=courses, notes=notes)
+    return ParseResult(courses=courses, text_source=text_source, notes={})
 
 
-# ---------------------------------- CLI -------------------------------------
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Parse transcripts for course codes.")
-    p.add_argument("inputs", nargs="+", help="PDF file(s) to parse")
-    p.add_argument("--subjects", nargs="+", required=True, help="Subject areas (e.g., math stat cs)")
-    p.add_argument("--out", help="Optional JSON output path")
-    p.add_argument("--prefer-ocr", action="store_true", help="Force OCR even if PDF text looks OK")
-    return p
+def _dump_stdout(base: str, res: ParseResult, subjects: list[str]) -> None:
+    print(f"Results for {base}")
+    if res.courses:
+        for code, snippet in res.courses:
+            # Only print each course once per identical snippet
+            print(f"  {code} — {snippet}")
+    else:
+        print(" [no course codes detected]")
+    print(f"Parsed {base} (subjects: {', '.join(subjects)}; text_source={res.text_source})")
 
 
 def main(argv: list[str] | None = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("input", help="PDF file to parse")
+    ap.add_argument("--subjects", nargs="+", required=True, help="Subjects to extract (e.g., math stat)")
+    ap.add_argument("--out", help="Optional JSON file to write results")
+    ap.add_argument("--prefer-ocr", action="store_true", help="Force OCR even if PDF text is present")
+    args = ap.parse_args(argv)
 
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    path = Path(args.input)
+    base = path.name
 
-    # Process the first input only for CLI output parity with prior behavior
-    in_path = Path(args.inputs[0])
-    result = parse_file(in_path, subjects=args.subjects, prefer_ocr=args.prefer_ocr)
-
-    print(f"Results for {result.file}")
-    if result.courses:
-        for c in result.courses:
-            print(f"  {c}")
-    else:
-        print(" [no course codes detected]")
-
-    base = Path(result.file).name
-    subj_str = ", ".join(s.lower() for s in args.subjects)
-    print(f"Parsed {base} (subjects: {subj_str}; text_source={result.text_source})")
+    res = parse_file(path, args.subjects, prefer_ocr=args.prefer_ocr)
 
     if args.out:
         payload = {
-            "file": result.file,
-            "text_source": result.text_source,
-            "courses": result.courses,
-            "notes": result.notes,
+            "file": base,
+            "subjects": args.subjects,
+            "text_source": res.text_source,
+            "courses": [{"code": c, "line": s} for c, s in res.courses],
+            "notes": res.notes,
         }
         Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    else:
+        _dump_stdout(base, res, args.subjects)
 
 
 if __name__ == "__main__":
