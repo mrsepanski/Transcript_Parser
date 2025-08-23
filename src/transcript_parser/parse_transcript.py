@@ -28,8 +28,8 @@ SINGLE_TOKEN_PAT = re.compile(r"(?i)^([A-Z]{2,})[-:]?(\d{3}[A-Z]?)$")
 
 
 def _normalize_text(s: str) -> str:
-    s = s.replace("\xa0", " ")  # actual NBSP char
-    s = s.replace("\u00a0", " ")  # literal backslash-u sequence, if present
+    s = s.replace("\xa0", " ")
+    s = s.replace("\u00a0", " ")
     s = s.replace("\u2013", "-").replace("\u2014", "-")
     return s
 
@@ -84,6 +84,18 @@ def _scan_lines_for_codes(lines: list[str], allowed: set[str]) -> list[tuple[str
     return out
 
 
+def _scan_block_for_codes(text: str, allowed: set[str]) -> list[tuple[str, str]]:
+    # Allow up to 50 non-alnum chars between prefix and the 3-digit number (handles PDF operators)
+    out: list[tuple[str, str]] = []
+    for prefix in sorted(allowed):
+        pat = re.compile(rf"(?is)\b{re.escape(prefix)}[^\da-zA-Z]{{0,50}}(\d{{3}}[A-Za-z]?)\b")
+        for m in pat.finditer(text):
+            out.append((f"{prefix} {m.group(1).upper()}", ""))
+            if len(out) >= 5:
+                return out
+    return out
+
+
 # ---------- Fallback (word tokens) ----------
 def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
     if pdfplumber is None:
@@ -123,7 +135,7 @@ def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]
     return out
 
 
-# ---------- Fallback (generic line scan) ----------
+# ---------- Fallbacks ----------
 def _fallback_generic(lines: list[str], allowed: set[str]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for line in lines:
@@ -140,30 +152,24 @@ def _fallback_generic(lines: list[str], allowed: set[str]) -> list[tuple[str, st
     return out
 
 
-# ---------- Fallback (zlib-decompress PDF streams) ----------
 def _scan_zlib_streams_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
     try:
         data = path.read_bytes()
     except Exception:
         return []
-    # Find all stream...endstream blocks (very simple heuristic)
     out: list[tuple[str, str]] = []
     for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, flags=re.DOTALL):
         block = m.group(1)
-        # Try flate decompress; if fails, skip
         try:
             decomp = zlib.decompress(block)
         except Exception:
             continue
         text = _normalize_text(decomp.decode("latin-1", errors="ignore"))
-        for hit in GENERIC_CODE_PAT.finditer(text):
-            prefix = hit.group(1).upper()
-            if allowed and prefix not in allowed:
-                continue
-            number = hit.group(2).upper()
-            out.append((f"{prefix} {number}", ""))
-            if len(out) >= 5:
-                return out
+        # Pairwise prefix-number search tolerant of PDF operators
+        res = _scan_block_for_codes(text, allowed)
+        out.extend(res)
+        if len(out) >= 5:
+            break
     return out
 
 
@@ -173,19 +179,26 @@ def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], st
     lines = _extract_text_lines(path)
     matches = _scan_lines_for_codes(lines, allowed)
     source = "pdf"
-    # 2) Words
+    # 2) Whole-text block tolerant scan
+    if not matches and lines:
+        block = _normalize_text(" ".join(lines))
+        block_hits = _scan_block_for_codes(block, allowed)
+        if block_hits:
+            matches = block_hits
+            source = "pdf_block"
+    # 3) Words
     if not matches:
         word_matches = _scan_words_for_codes(path, allowed)
         if word_matches:
             matches = word_matches
             source = "pdf_words"
-    # 3) Generic on lines (no strict subject dependency)
+    # 4) Generic on lines
     if not matches and lines:
         generic = _fallback_generic(lines, allowed)
         if generic:
             matches = generic
             source = "pdf_generic"
-    # 4) Zlib streams (works for small ReportLab PDFs even without pdfplumber)
+    # 5) Zlib streams
     if not matches:
         z_hits = _scan_zlib_streams_for_codes(path, allowed)
         if z_hits:
