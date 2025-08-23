@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import zlib
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -22,7 +23,6 @@ SUBJECT_ALIASES: dict[str, list[str]] = {
     "engr": ["ENGR", "EGR"],
 }
 
-# Generic course code pattern (prefix then number), case-insensitive.
 GENERIC_CODE_PAT = re.compile(r"(?i)\b([A-Z]{2,})\s*[-:\s\u00A0\xa0]?\s*(\d{3}[A-Z]?)\b")
 SINGLE_TOKEN_PAT = re.compile(r"(?i)^([A-Z]{2,})[-:]?(\d{3}[A-Z]?)$")
 
@@ -49,6 +49,7 @@ def _allowed_set(subjects: Iterable[str]) -> set[str]:
     return {p.upper() for p in _expand_subjects(subjects)}
 
 
+# ---------- Primary (text) path ----------
 def _extract_text_lines(path: Path) -> list[str]:
     if pdfplumber is None:
         return []
@@ -83,6 +84,7 @@ def _scan_lines_for_codes(lines: list[str], allowed: set[str]) -> list[tuple[str
     return out
 
 
+# ---------- Fallback (word tokens) ----------
 def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
     if pdfplumber is None:
         return []
@@ -121,11 +123,16 @@ def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]
     return out
 
 
-def _fallback_generic(lines: list[str]) -> list[tuple[str, str]]:
+# ---------- Fallback (generic line scan) ----------
+def _fallback_generic(lines: list[str], allowed: set[str]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for line in lines:
         for m in GENERIC_CODE_PAT.finditer(line):
-            code = f"{m.group(1).upper()} {m.group(2).upper()}"
+            prefix = m.group(1).upper()
+            if allowed and prefix not in allowed:
+                continue
+            number = m.group(2).upper()
+            code = f"{prefix} {number}"
             after = line[m.end() :]
             after = re.split(r"\b[A-Z]{2,}\s*[-:\s\u00A0\xa0]?\s*\d{3}[A-Z]?\b", after, maxsplit=1)[0]
             snippet = after.strip()
@@ -133,47 +140,57 @@ def _fallback_generic(lines: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-def _scan_binary_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
-    # Last ditch: read raw bytes and look for ASCII text occurrences (common in simple PDFs).
+# ---------- Fallback (zlib-decompress PDF streams) ----------
+def _scan_zlib_streams_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
     try:
         data = path.read_bytes()
     except Exception:
         return []
-    # Decode losslessly; PDF content streams often contain plain ASCII between operators.
-    s = data.decode("latin-1", errors="ignore")
-    s = _normalize_text(s)
+    # Find all stream...endstream blocks (very simple heuristic)
     out: list[tuple[str, str]] = []
-    for m in GENERIC_CODE_PAT.finditer(s):
-        prefix = m.group(1).upper()
-        number = m.group(2).upper()
-        if allowed and prefix not in allowed:
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, flags=re.DOTALL):
+        block = m.group(1)
+        # Try flate decompress; if fails, skip
+        try:
+            decomp = zlib.decompress(block)
+        except Exception:
             continue
-        out.append((f"{prefix} {number}", ""))
-        if len(out) >= 5:
-            break
+        text = _normalize_text(decomp.decode("latin-1", errors="ignore"))
+        for hit in GENERIC_CODE_PAT.finditer(text):
+            prefix = hit.group(1).upper()
+            if allowed and prefix not in allowed:
+                continue
+            number = hit.group(2).upper()
+            out.append((f"{prefix} {number}", ""))
+            if len(out) >= 5:
+                return out
     return out
 
 
 def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], str]:
     allowed = _allowed_set(subjects)
+    # 1) Text lines
     lines = _extract_text_lines(path)
     matches = _scan_lines_for_codes(lines, allowed)
     source = "pdf"
+    # 2) Words
     if not matches:
         word_matches = _scan_words_for_codes(path, allowed)
         if word_matches:
             matches = word_matches
             source = "pdf_words"
+    # 3) Generic on lines (no strict subject dependency)
     if not matches and lines:
-        generic = _fallback_generic(lines)
+        generic = _fallback_generic(lines, allowed)
         if generic:
             matches = generic
             source = "pdf_generic"
+    # 4) Zlib streams (works for small ReportLab PDFs even without pdfplumber)
     if not matches:
-        bin_matches = _scan_binary_for_codes(path, allowed)
-        if bin_matches:
-            matches = bin_matches
-            source = "pdf_binary"
+        z_hits = _scan_zlib_streams_for_codes(path, allowed)
+        if z_hits:
+            matches = z_hits
+            source = "pdf_streams"
     return matches, source
 
 
