@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover
     pdfplumber = None  # type: ignore
 
-SUBJECT_ALIASES = {
+SUBJECT_ALIASES: dict[str, list[str]] = {
     "math": ["MATH", "MAT", "MTH", "MA", "MATG"],
     "stat": ["STAT", "STA"],
     "cs": ["CS", "CSC", "CSCI", "CSE", "COSC"],
@@ -27,21 +27,21 @@ COURSE_PAT_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
 
 def _normalize_text(s: str) -> str:
     # Normalize common PDF oddities
-    s = s.replace("\u00a0", " ")  # NBSP to space (if double-escaped)
-    s = s.replace("\xa0", " ")  # NBSP to space (literal escape)
+    s = s.replace("\u00a0", " ")  # NBSP to space
+    s = s.replace("\xa0", " ")  # alternate NBSP escape
     s = s.replace("\u2013", "-").replace("\u2014", "-")
     return s
 
 
 def _course_pattern(prefixes: Iterable[str]) -> re.Pattern[str]:
-    key = tuple(sorted(set(p.upper() for p in prefixes)))
+    # Accept PREFIX 123, PREFIX-123, PREFIX:123, PREFIX\n123, and PREFIX123
+    key = tuple(sorted({p.upper() for p in prefixes}))
     if key in COURSE_PAT_CACHE:
         return COURSE_PAT_CACHE[key]
-    # Accept PREFIX 123, PREFIX-123, PREFIX:123, or PREFIX123
-    # Allow non-breaking spaces and repeated separators
-    pfx_group = f"(?:{'|'.join(re.escape(p) for p in key)})"
-    sep = r"(?:[\s :\-])*"
-    pat = re.compile(rf"(?<!\w){pfx_group}{sep}(\d{{3}}[A-Z]?)", re.IGNORECASE)
+    pfx_group = "(?:" + "|".join(re.escape(p) for p in key) + ")"
+    sep = r"(?:[\s\u00A0:\-])*"  # spaces/NBSP/colon/dash, any count
+    # Real word-boundary \b (important for tests expecting 'MATH 101')
+    pat = re.compile(rf"(?<!\w){pfx_group}{sep}(\d{{3}}[A-Z]?)\b", re.IGNORECASE)
     COURSE_PAT_CACHE[key] = pat
     return pat
 
@@ -54,14 +54,13 @@ def _expand_subjects(subjects: Iterable[str]) -> list[str]:
             expanded.update(SUBJECT_ALIASES[s_key])
         else:
             expanded.add(s.upper())
-    # Always include exact tokens provided, just in case
     return sorted(expanded)
 
 
 def extract_pdf_text(path: Path, max_pages: int | None = None) -> str:
     if pdfplumber is None:
         return ""
-    text_parts: list[str] = []
+    parts: list[str] = []
     with pdfplumber.open(path) as pdf:
         pages = pdf.pages if max_pages is None else pdf.pages[:max_pages]
         for p in pages:
@@ -69,8 +68,8 @@ def extract_pdf_text(path: Path, max_pages: int | None = None) -> str:
                 t = p.extract_text() or ""
             except Exception:
                 t = ""
-            text_parts.append(t)
-    return _normalize_text("\n".join(text_parts))
+            parts.append(t)
+    return _normalize_text("\n".join(parts))
 
 
 def find_courses_in_text(text: str, prefixes: Iterable[str]) -> list[tuple[str, str]]:
@@ -79,12 +78,12 @@ def find_courses_in_text(text: str, prefixes: Iterable[str]) -> list[tuple[str, 
     for raw_line in text.splitlines():
         line = raw_line.replace("\xa0", " ").replace("\u00a0", " ")
         for m in pat.finditer(line):
+            # Isolate the alphabetic prefix
             prefix_match = m.group(0)[: m.group(0).find(m.group(1))]
             prefix_clean = re.sub(r"[^A-Za-z]", "", prefix_match).upper()
             code = f"{prefix_clean} {m.group(1)}"
-            # Snippet: text after the match until the next code (rough trim)
+            # Snippet: text after match, cut before next course token on same line
             after = line[m.end() :]
-            # Cut at next uppercase prefix occurrence to avoid concatenation
             after = re.split(r"\b[A-Z]{2,}\s*[-:\s]?\s*\d{3}[A-Z]?\b", after, maxsplit=1)[0]
             snippet = after.strip()
             found.append((code, snippet))
@@ -96,8 +95,7 @@ def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], st
     text = extract_pdf_text(path)
     matches = find_courses_in_text(text, prefixes)
     text_source = "pdf"
-    # OCR fallback is intentionally avoided for test PDFs and text-rich docs.
-    # (Your runtime container has PaddleOCR; integrate here if needed.)
+    # (Optional OCR fallback can be plugged here; current flow is pdf-first only.)
     return matches, text_source
 
 
@@ -119,10 +117,7 @@ def main(argv: list[str] | None = None) -> None:
             print(" [no course codes detected]")
         else:
             for code, snippet in matches:
-                if snippet:
-                    print(f"  {code} — {snippet}")
-                else:
-                    print(f"  {code}")
+                print(f"  {code} — {snippet}" if snippet else f"  {code}")
 
         print(f"Parsed {base} (subjects: {', '.join(args.subjects)}; text_source={text_source})")
 
