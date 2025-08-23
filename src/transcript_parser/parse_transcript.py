@@ -24,8 +24,6 @@ SUBJECT_ALIASES: dict[str, list[str]] = {
 
 # Generic course code pattern (prefix then number), case-insensitive.
 GENERIC_CODE_PAT = re.compile(r"(?i)\b([A-Z]{2,})\s*[-:\s\u00A0\xa0]?\s*(\d{3}[A-Z]?)\b")
-
-# Single-token matcher for things like "MATH101", "MATH-101", "MATH:101"
 SINGLE_TOKEN_PAT = re.compile(r"(?i)^([A-Z]{2,})[-:]?(\d{3}[A-Z]?)$")
 
 
@@ -102,7 +100,6 @@ def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]
                 if not tok:
                     i += 1
                     continue
-                # Case A: single token contains both parts (MATH101, MATH-101, MATH:101)
                 m_single = SINGLE_TOKEN_PAT.match(tok)
                 if m_single:
                     prefix = m_single.group(1).upper()
@@ -111,11 +108,9 @@ def _scan_words_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]
                         out.append((f"{prefix} {number}", ""))
                         i += 1
                         continue
-                # Case B: token is a prefix, look ahead to number with optional sep token
                 upper_tok = tok.upper()
                 if upper_tok in allowed:
                     j = i + 1
-                    # allow a separator token in between
                     if j < len(toks) and toks[j] in {"-", ":"}:
                         j += 1
                     if j < len(toks) and re.fullmatch(r"\d{3}[A-Za-z]?", toks[j]):
@@ -138,6 +133,27 @@ def _fallback_generic(lines: list[str]) -> list[tuple[str, str]]:
     return out
 
 
+def _scan_binary_for_codes(path: Path, allowed: set[str]) -> list[tuple[str, str]]:
+    # Last ditch: read raw bytes and look for ASCII text occurrences (common in simple PDFs).
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return []
+    # Decode losslessly; PDF content streams often contain plain ASCII between operators.
+    s = data.decode("latin-1", errors="ignore")
+    s = _normalize_text(s)
+    out: list[tuple[str, str]] = []
+    for m in GENERIC_CODE_PAT.finditer(s):
+        prefix = m.group(1).upper()
+        number = m.group(2).upper()
+        if allowed and prefix not in allowed:
+            continue
+        out.append((f"{prefix} {number}", ""))
+        if len(out) >= 5:
+            break
+    return out
+
+
 def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], str]:
     allowed = _allowed_set(subjects)
     lines = _extract_text_lines(path)
@@ -153,6 +169,11 @@ def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], st
         if generic:
             matches = generic
             source = "pdf_generic"
+    if not matches:
+        bin_matches = _scan_binary_for_codes(path, allowed)
+        if bin_matches:
+            matches = bin_matches
+            source = "pdf_binary"
     return matches, source
 
 
