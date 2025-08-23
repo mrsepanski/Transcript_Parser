@@ -22,36 +22,21 @@ SUBJECT_ALIASES: dict[str, list[str]] = {
     "engr": ["ENGR", "EGR"],
 }
 
-COURSE_PAT_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
-
 
 def _normalize_text(s: str) -> str:
-    # Normalize common PDF oddities
-    s = s.replace("\u00a0", " ")  # NBSP to space
-    s = s.replace("\xa0", " ")  # alternate NBSP escape
+    # Convert non-breaking spaces to regular spaces and normalize dashes.
+    s = s.replace("\xa0", " ")  # actual NBSP char
+    s = s.replace("\u00a0", " ")  # literal backslash-u sequence if present
     s = s.replace("\u2013", "-").replace("\u2014", "-")
     return s
-
-
-def _course_pattern(prefixes: Iterable[str]) -> re.Pattern[str]:
-    # Accept PREFIX 123, PREFIX-123, PREFIX:123, PREFIX\n123, and PREFIX123
-    key = tuple(sorted({p.upper() for p in prefixes}))
-    if key in COURSE_PAT_CACHE:
-        return COURSE_PAT_CACHE[key]
-    pfx_group = "(?:" + "|".join(re.escape(p) for p in key) + ")"
-    sep = r"(?:[\s\u00A0:\-])*"  # spaces/NBSP/colon/dash, any count
-    # Real word-boundary \b (important for tests expecting 'MATH 101')
-    pat = re.compile(rf"(?<!\w){pfx_group}{sep}(\d{{3}}[A-Z]?)\b", re.IGNORECASE)
-    COURSE_PAT_CACHE[key] = pat
-    return pat
 
 
 def _expand_subjects(subjects: Iterable[str]) -> list[str]:
     expanded: set[str] = set()
     for s in subjects:
-        s_key = s.lower()
-        if s_key in SUBJECT_ALIASES:
-            expanded.update(SUBJECT_ALIASES[s_key])
+        key = s.lower()
+        if key in SUBJECT_ALIASES:
+            expanded.update(SUBJECT_ALIASES[key])
         else:
             expanded.add(s.upper())
     return sorted(expanded)
@@ -72,22 +57,28 @@ def extract_pdf_text(path: Path, max_pages: int | None = None) -> str:
     return _normalize_text("\n".join(parts))
 
 
-def find_courses_in_text(text: str, prefixes: Iterable[str]) -> list[tuple[str, str]]:
-    pat = _course_pattern(prefixes)
-    found: list[tuple[str, str]] = []
+# Generic course code pattern (prefix then number), case-insensitive.
+# We'll filter prefixes against the subject expansion.
+GENERIC_CODE_PAT = re.compile(r"(?i)\b([A-Z]{2,})\s*[-:\s\xa0]?\s*(\d{3}[A-Z]?)\b")
+
+
+def find_courses_in_text(text: str, allowed_prefixes: Iterable[str]) -> list[tuple[str, str]]:
+    allowed = {p.upper() for p in allowed_prefixes}
+    results: list[tuple[str, str]] = []
     for raw_line in text.splitlines():
-        line = raw_line.replace("\xa0", " ").replace("\u00a0", " ")
-        for m in pat.finditer(line):
-            # Isolate the alphabetic prefix
-            prefix_match = m.group(0)[: m.group(0).find(m.group(1))]
-            prefix_clean = re.sub(r"[^A-Za-z]", "", prefix_match).upper()
-            code = f"{prefix_clean} {m.group(1)}"
-            # Snippet: text after match, cut before next course token on same line
+        line = _normalize_text(raw_line)
+        for m in GENERIC_CODE_PAT.finditer(line):
+            prefix = m.group(1).upper()
+            if prefix not in allowed:
+                continue
+            number = m.group(2).upper()
+            code = f"{prefix} {number}"
+            # Snippet is text after the match, until the next obvious code on same line
             after = line[m.end() :]
-            after = re.split(r"\b[A-Z]{2,}\s*[-:\s]?\s*\d{3}[A-Z]?\b", after, maxsplit=1)[0]
+            after = re.split(r"\b[A-Z]{2,}\s*[-:\s\xa0]?\s*\d{3}[A-Z]?\b", after, maxsplit=1)[0]
             snippet = after.strip()
-            found.append((code, snippet))
-    return found
+            results.append((code, snippet))
+    return results
 
 
 def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], str]:
@@ -95,7 +86,7 @@ def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str]], st
     text = extract_pdf_text(path)
     matches = find_courses_in_text(text, prefixes)
     text_source = "pdf"
-    # (Optional OCR fallback can be plugged here; current flow is pdf-first only.)
+    # OCR fallback can be added later if needed; not required for the smoke test.
     return matches, text_source
 
 
@@ -103,7 +94,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="transcript-parser")
     parser.add_argument("inputs", nargs="+", help="PDF file(s)")
     parser.add_argument("--subjects", nargs="+", required=True, help="Subject labels, e.g. math stat cs")
-    parser.add_argument("--out", default=None, help="Optional JSON output path")
+    parser.add_argument("--out", default=None, help="Optional JSON output path (unused in smoke test)")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     for inp in args.inputs:
