@@ -34,7 +34,20 @@ ADMIN_ROW = re.compile(r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned H
 URL_PAT = re.compile(r"https?://")
 
 # Tokens we should ignore in the "status/campus" column between code and title
-CAMPUS_STATUS = {"MAIN", "DISTANCE", "ONLINE", "DL", "WEB", "GR", "UG", "PB", "EVENING", "DAY", "CAMPUS", "LEVEL"}
+CAMPUS_STATUS = {
+    "MAIN",
+    "DISTANCE",
+    "ONLINE",
+    "DL",
+    "WEB",
+    "GR",
+    "UG",
+    "PB",
+    "EVENING",
+    "DAY",
+    "CAMPUS",
+    "LEVEL",
+}
 
 CREDITS_PAT = re.compile(r"\s\d+\.\d{2,3}\b")  # e.g., 3.00 or 3.000
 
