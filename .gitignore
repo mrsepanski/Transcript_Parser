@@ -95,3 +95,6 @@ out.json
 
 # Ignore Windows ADS copies
 *:[Zz]one.Identifier
+
+# Ignore Windows ADS copies
+*:[Zz]one.Identifier
