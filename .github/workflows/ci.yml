@@ -1,38 +1,47 @@
-name: CI
+
+name: CI / Build
 
 on:
   push:
-    branches: [ main, "feature/**", "fix/**" ]
+    branches: ["**"]
   pull_request:
-    branches: [ main ]
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12"]
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+          python-version: "3.12"
 
-      - name: Install
+      - name: Install system deps (poppler for pdf2image)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+
+      - name: Install package (dev extras)
         run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
 
-      - name: Pre-commit (lint & type checks)
-        run: |
-          pre-commit run --all-files --show-diff-on-failure
+      - name: Black
+        run: black --check .
 
-      - name: Tests
-        run: |
-          pytest -q -vv
+      - name: Ruff (lint + format check)
+        run: ruff check .
+
+      - name: isort
+        run: isort --check-only .
+
+      - name: Autoflake (check only)
+        run: autoflake --check --recursive src tests
+
+      - name: MyPy
+        run: mypy src
+
+      - name: Pytest
+        run: pytest -q

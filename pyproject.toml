@@ -1,36 +1,56 @@
+
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "transcript_parser"
-version = "0.1.0"
-description = "Transcript parsing utilities"
+version = "0.1.1"
+description = "Transcript parsing utilities (pdfplumber-first, OCR fallback optional)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pdfplumber>=0.9.0",
+    "pdf2image>=1.17.0",
+    "reportlab>=4.1.0",
+]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pre-commit",
-    "black",
-    "ruff",
-    "isort",
-    "mypy",
-    "autoflake",
-    "reportlab",
+    "pytest>=8.2",
+    "pre-commit>=3.7",
+    "black>=24.3.0",
+    "ruff>=0.5.0",
+    "isort>=5.13.0",
+    "mypy>=1.10.0",
+    "autoflake>=2.3.1"
 ]
+# Optional OCR stack; handy for local dev machines outside Docker
+paddle = [
+    "numpy<2",
+    "opencv-python-headless",
+    "paddlepaddle==2.6.1",
+    "paddleocr>=2.7.3",
+]
+
+[project.scripts]
+transcript-parser = "transcript_parser.parse_transcript:main"
+
+[tool.isort]
+profile = "black"
+
+[tool.black]
+line-length = 100
+target-version = ["py311","py312"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
 pythonpath = ["src"]
-# Silence noisy third‑party deprecation warnings so smoke tests stay readable.
-# These are from external libs (protobuf, paddle/paddlex, astor) and not in our code.
-filterwarnings = [
-  'ignore:datetime\.datetime\.utcfromtimestamp\(\) is deprecated.*:DeprecationWarning:google\.protobuf',
-  'ignore:Call to deprecated create function .*:DeprecationWarning:paddle\..*',
-  'ignore:Call to deprecated create function .*:DeprecationWarning:paddle\.base\.proto\..*',
-  'ignore:ast\.Num is deprecated.*:DeprecationWarning:astor\.op_util',
-]
