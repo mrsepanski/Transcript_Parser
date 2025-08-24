@@ -92,3 +92,9 @@ out.json
 *.tar.gz
 *.tgz
 *.7z
+
+# Ignore Windows ADS copies
+*:[Zz]one.Identifier
+
+# Ignore Windows ADS copies
+*:[Zz]one.Identifier
