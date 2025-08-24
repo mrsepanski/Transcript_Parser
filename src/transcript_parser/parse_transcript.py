@@ -28,9 +28,13 @@ SUBJECT_ALIASES: dict[str, list[str]] = {
 # ---------- Regexes ----------
 START_CODE_PAT = re.compile(r"(?i)^\s*([A-Z]{2,})\s*[-:\s]?\s*(\d{3,4}[A-Z]?)\b")
 NUM_TOKEN_PAT = re.compile(r"(?i)^\d{3,4}[A-Z]?$")
-GRADE_PAT = re.compile(r"(?i)(?<!\w)(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|E|F|P|S|U|T|I|IN PROGRESS)(?!\w)")
+GRADE_PAT = re.compile(
+    r"(?i)(?<!\w)(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|E|F|P|S|U|T|I|IN PROGRESS)(?!\w)"
+)
 
-ADMIN_ROW = re.compile(r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned Hrs|TRANSCRIPT TOTALS|Totals?)\b")
+ADMIN_ROW = re.compile(
+    r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned Hrs|TRANSCRIPT TOTALS|Totals?)\b"
+)
 URL_PAT = re.compile(r"https?://")
 
 # Tokens we should ignore in the "status/campus" column between code and title
@@ -180,7 +184,9 @@ def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None
     for r in page1[:60]:
         txt = _row_text(r)
         up = txt.upper()
-        if any(k in up for k in UNIV_KEYWORDS) and not re.search(r"(?i)^\s*[A-Z][A-Za-z &/]+\s:\s", txt):
+        if any(k in up for k in UNIV_KEYWORDS) and not re.search(
+            r"(?i)^\s*[A-Z][A-Za-z &/]+\s:\s", txt
+        ):
             university = _cut_boiler(txt)
             if 6 <= len(university) <= 120:
                 break
@@ -331,7 +337,9 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
     return out
 
 
-def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str, str]], tuple[str | None, str | None], bool]:
+def run_file(
+    path: Path, subjects: list[str]
+) -> tuple[list[tuple[str, str, str]], tuple[str | None, str | None], bool]:
     allowed = _allowed_set(subjects)
     rows = _extract_rows(path)
     matches = _scan_rows_for_courses(rows, allowed)
@@ -343,7 +351,9 @@ def run_file(path: Path, subjects: list[str]) -> tuple[list[tuple[str, str, str]
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="transcript-parser")
     parser.add_argument("inputs", nargs="+", help="PDF file(s)")
-    parser.add_argument("--subjects", nargs="+", required=True, help="Subject labels, e.g. math stat cs")
+    parser.add_argument(
+        "--subjects", nargs="+", required=True, help="Subject labels, e.g. math stat cs"
+    )
     parser.add_argument("--out", default=None, help="Optional JSON output path (unused here)")
     parser.add_argument("--verbose", action="store_true", help="Print detection details (OCR flag)")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
