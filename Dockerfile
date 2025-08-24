@@ -1,3 +1,4 @@
+
 # Dockerfile (CPU, PaddleOCR included by default)
 FROM python:3.12-slim
 
