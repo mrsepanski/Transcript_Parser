@@ -47,8 +47,12 @@ SUBJECT_ALIASES = {
 
 # ---------- Regexes ----------
 NUM_TOKEN_PAT = re.compile(r"(?i)^\d{3,4}[A-Z]?$")
-GRADE_PAT = re.compile(r"(?i)(?<!\w)(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|E|F|P|S|U|T|I|IN PROGRESS)(?!\w)")
-ADMIN_ROW = re.compile(r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned Hrs|TRANSCRIPT TOTALS|Totals?)\b")
+GRADE_PAT = re.compile(
+    r"(?i)(?<!\w)(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|E|F|P|S|U|T|I|IN PROGRESS)(?!\w)"
+)
+ADMIN_ROW = re.compile(
+    r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned Hrs|TRANSCRIPT TOTALS|Totals?)\b"
+)
 URL_PAT = re.compile(r"https?://")
 CREDITS_PAT = re.compile(r"\s\d+\.\d{2,3}\b")  # e.g., 3.00 or 3.000
 
@@ -258,7 +262,9 @@ def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None
     for r in page1[:60]:
         txt = _row_text(r)
         up = txt.upper()
-        if any(k in up for k in UNIV_KEYWORDS) and not re.search(r"(?i)^\s*[A-Z][A-Za-z &/]+\s:\s", txt):
+        if any(k in up for k in UNIV_KEYWORDS) and not re.search(
+            r"(?i)^\s*[A-Z][A-Za-z &/]+\s:\s", txt
+        ):
             cand = _cut_boiler(txt)
             if 6 <= len(cand) <= 120:
                 university = cand
@@ -418,7 +424,9 @@ def run_file(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="transcript-parser")
     parser.add_argument("inputs", nargs="+", help="PDF file(s)")
-    parser.add_argument("--subjects", nargs="+", required=True, help="Subject labels, e.g. math stat cs")
+    parser.add_argument(
+        "--subjects", nargs="+", required=True, help="Subject labels, e.g. math stat cs"
+    )
     parser.add_argument("--out", default=None, help="Optional JSON output path (unused here)")
     parser.add_argument("--verbose", action="store_true", help="Print detection details (OCR flag)")
     parser.add_argument(
@@ -433,7 +441,9 @@ def main(argv: list[str] | None = None) -> None:
         base = p.name
         print(f"Results for {base}")
 
-        matches, (student, university), ocr_used = run_file(p, args.subjects, prefer_ocr=args.force_ocr)
+        matches, (student, university), ocr_used = run_file(
+            p, args.subjects, prefer_ocr=args.force_ocr
+        )
 
         print(f"  Student: {student or '(unknown)'}")
         print(f"  University: {university or '(unknown)'}")
