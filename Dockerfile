@@ -1,29 +1,24 @@
-
-# Dockerfile (CPU, PaddleOCR included by default)
+# syntax=docker/dockerfile:1.7-labs
 FROM python:3.12-slim
 
-ENV PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1     PYTHONDONTWRITEBYTECODE=1     PYTHONUNBUFFERED=1
 
-# System dependencies:
-# - poppler-utils: needed by pdf2image (pdftoppm)
-# - ghostscript: occasionally useful for PDF normalization
-# - libglib2.0-0, libsm6, libxext6, libxrender1: OpenCV runtime deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils ghostscript \
-    libglib2.0-0 libsm6 libxext6 libxrender1 \
-    && rm -rf /var/lib/apt/lists/*
+# System deps: poppler for pdf2image; libs for opencv
+RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt     apt-get update &&     apt-get install -y --no-install-recommends       poppler-utils       libglib2.0-0       libsm6       libxrender1       libxext6       curl ca-certificates &&     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy project metadata early for layer caching
+# Copy only dependency files first for better caching
 COPY pyproject.toml README.md /app/
 
-# Install the package with dev + paddle extras so OCR fallback is always available
-RUN python -m pip install --upgrade pip && pip install -e ".[dev,paddle]"
+# Install build tools for wheels if needed
+RUN python -m pip install --upgrade pip setuptools wheel
 
-# Copy source last (fewer cache busts)
+# Install project (this will pull paddlepaddle/paddleocr from pyproject deps)
+RUN --mount=type=cache,target=/root/.cache/pip     pip install .
+
+# Now copy the rest of the source
 COPY src /app/src
 
-# Default command shows CLI help; override at runtime to parse files
-CMD ["python", "-m", "transcript_parser.parse_transcript", "-h"]
+# Default command shows CLI help
+CMD ["transcript-parser", "--help"]

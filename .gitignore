@@ -25,10 +25,6 @@ var/
 .installed.cfg
 *.egg
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -42,59 +38,40 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-tests/__pycache__/
 
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# pyenv
+.python-version
+
+# Environments
+.env
+.env.*
+.venv
+env/
+venv/
+ENV/
+
 # mypy
 .mypy_cache/
-.dmypy.json
-dmypy.json
 
-# Pyre type checker
-.pyre/
+# ruff
+.ruff_cache/
 
-# pytype
-.pytype/
+# pytest
+.pytest_cache/
 
-# VS Code
-.vscode/
-*.code-workspace
-
-# IDEs
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Docker
-*.pid
-*.log
-docker-compose.override.yml
-
-# Data / output
-/data/
-*.pdf
-*.json
-*.out
-
-# Local test files
-Test_Files/
-ocr_debug/
+# project outputs
 out.json
+ocr_debug/
+Test_Files/
 
-# Archives and junk
+# Archives
 *.zip
 *.tar.gz
 *.tgz
 *.7z
 
-# Ignore Windows ADS copies
-*:[Zz]one.Identifier
-
-# Ignore Windows ADS copies
+# Windows ADS sidecars
 *:[Zz]one.Identifier
