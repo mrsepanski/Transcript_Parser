@@ -1,18 +1,21 @@
-
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "transcript_parser"
-version = "0.1.1"
-description = "Transcript parsing utilities (pdfplumber-first, OCR fallback optional)"
+version = "0.5.4"
+description = "Transcript parsing utilities (pdfplumber-first, PaddleOCR fallback built-in)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pdfplumber>=0.9.0",
     "pdf2image>=1.17.0",
     "reportlab>=4.1.0",
+    "numpy<2",
+    "opencv-python-headless",
+    "paddlepaddle==2.6.1",
+    "paddleocr>=2.7.3",
 ]
 
 [project.optional-dependencies]
@@ -24,13 +27,6 @@ dev = [
     "isort>=5.13.0",
     "mypy>=1.10.0",
     "autoflake>=2.3.1"
-]
-# Optional OCR stack; handy for local dev machines outside Docker
-paddle = [
-    "numpy<2",
-    "opencv-python-headless",
-    "paddlepaddle==2.6.1",
-    "paddleocr>=2.7.3",
 ]
 
 [project.scripts]
