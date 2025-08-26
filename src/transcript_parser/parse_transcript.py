@@ -16,7 +16,6 @@ except Exception:
 
 
 # -------- Optional OCR stack (PaddleOCR) --------
-# NOTE: Never use deprecated `use_angle_cls`.
 def _lazy_import_paddle():
     try:
         from paddleocr import PaddleOCR  # type: ignore
@@ -47,14 +46,52 @@ SUBJECT_ALIASES = {
 
 # ---------- Regexes ----------
 NUM_TOKEN_PAT = re.compile(r"(?i)^\d{3,4}[A-Z]?$")
-GRADE_PAT = re.compile(
-    r"(?i)(?<!\w)(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|E|F|P|S|U|T|I|IN PROGRESS)(?!\w)"
-)
+
+# Strict letter grades A-F with optional +/-
+GRADE_TOKEN_STRICT = re.compile(r"(?i)^(A|B|C|D|F)([+\-\u2212])?$")
+# Status/loose grades (avoid unless no strict grade found)
+GRADE_TOKEN_LOOSE = re.compile(r"(?i)^(P|S|U|I|T)$")
+INPROG_PAT = re.compile(r"(?i)\bIN\s+PROGRESS\b")
+
+# Row-level admin/heading detectors
 ADMIN_ROW = re.compile(
     r"(?i)^(Ehrs|GPA|TOTAL|Dean's List|Good Standing|Earned Hrs|TRANSCRIPT TOTALS|Totals?)\b"
 )
+SEMESTER_HEADING = re.compile(
+    r"(?i)^(FALL|SPRING|SUMMER|WINTER|AUTUMN|JAN|MAY|AUGUST)\s+(SEMESTER|TERM|SESSION|QUARTER)\b"
+)
+CUMULATIVE_HEADING = re.compile(r"(?i)^(CUMULATIVE|SUMMARY)\b")
+END_OF_TRANSCRIPT = re.compile(r"(?i)END OF TRANSCRIPT")
 URL_PAT = re.compile(r"https?://")
-CREDITS_PAT = re.compile(r"\s\d+\.\d{2,3}\b")  # e.g., 3.00 or 3.000
+
+# Token-level "stop" markers that should not appear inside titles
+STOP_TOKENS = {
+    "EARNED",
+    "EARNED:",
+    "CUMULATIVE",
+    "QPTS",
+    "GPA",
+    "ATT:",
+    "ATT",
+    "CREDITS",
+    "SEMESTER",
+    "TERM",
+    "SESSION",
+    "QUARTER",
+    "GRADUATE",
+    "UNDERGRADUATE",
+    "GRAD",
+    "END",
+    "TRANSCRIPT",
+    "EXPLANATION",
+    "REGISTRAR",
+    "REGISTRAR’S",
+    "REGISTRAR'S",
+    "OFFICE",
+}
+
+LEVEL_TOKEN = re.compile(r"(?i)^(UG|GR|G|U)$")  # program level markers, not grades
+FLAG_SINGLE_LETTERS = {"C", "R", "H"}  # tiny flags columns
 
 
 @dataclass
@@ -76,7 +113,7 @@ class Row:
 
 def _normalize_text(s: str) -> str:
     s = s.replace("\xa0", " ").replace("\u00a0", " ")
-    s = s.replace("\u2013", "-").replace("\u2014", "-")
+    s = s.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
     return s
 
 
@@ -95,7 +132,7 @@ def _allowed_set(subjects: Iterable[str]) -> set[str]:
     return {p.upper() for p in _expand_subjects(subjects)}
 
 
-def _extract_rows_pdfplumber(path: Path, y_tol: float = 2.0) -> list[Row]:
+def _extract_rows_pdfplumber(path: Path, y_tol: float = 3.2) -> list[Row]:
     rows: list[Row] = []
     if pdfplumber is None:
         return rows
@@ -134,7 +171,6 @@ def _extract_rows_ocr(path: Path, dpi: int = 300, y_tol: float = 6.0) -> list[Ro
         return rows
 
     try:
-        # Minimal, stable init. No deprecated args.
         ocr = PaddleOCR(lang="en")  # type: ignore
     except Exception:
         return rows
@@ -193,44 +229,116 @@ def _extract_rows_ocr(path: Path, dpi: int = 300, y_tol: float = 6.0) -> list[Ro
     return rows
 
 
+def _extract_rows(path: Path, prefer_ocr: bool = False) -> tuple[list[Row], bool]:
+    force_ocr = prefer_ocr or os.environ.get("TRANSCRIPT_FORCE_OCR", "").strip() == "1"
+    rows_pdf: list[Row] = [] if force_ocr else _extract_rows_pdfplumber(path)
+    if rows_pdf:
+        return rows_pdf, False
+    rows_ocr = _extract_rows_ocr(path)
+    if rows_ocr:
+        return rows_ocr, True
+    return [], False
+
+
 def _row_text(row: Row) -> str:
     return " ".join(t.text for t in row.toks)
 
 
 def _is_admin_row(txt: str) -> bool:
-    return bool(ADMIN_ROW.match(txt) or URL_PAT.search(txt))
+    up = txt.strip().upper()
+    if ADMIN_ROW.match(txt) or URL_PAT.search(txt):
+        return True
+    if SEMESTER_HEADING.match(up) or CUMULATIVE_HEADING.match(up):
+        return True
+    if END_OF_TRANSCRIPT.search(up):
+        return True
+    if up.startswith("FROM:") or up.startswith("TO:"):
+        return True
+    return False
 
 
-def _is_campus_token(txt: str) -> bool:
-    u = txt.strip(":-").upper()
-    return u in {
-        "MAIN",
-        "DISTANCE",
-        "ONLINE",
-        "DL",
-        "WEB",
-        "GR",
-        "UG",
-        "PB",
-        "EVENING",
-        "DAY",
-        "CAMPUS",
-        "LEVEL",
-    }
+def _is_stop_token(t: str) -> bool:
+    return (
+        t.strip().upper().rstrip(":") in STOP_TOKENS or INPROG_PAT.fullmatch(t.strip()) is not None
+    )
+
+
+def _iter_code_pairs(toks: list[Tok]) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    n = len(toks)
+    k = 0
+    while k < n - 1:
+        if re.fullmatch(r"[A-Za-z]{2,}", toks[k].text) and NUM_TOKEN_PAT.fullmatch(
+            toks[k + 1].text
+        ):
+            pairs.append((k, k + 1))
+            k += 2
+            continue
+        if (
+            k + 2 < n
+            and re.fullmatch(r"[A-Za-z]{2,}", toks[k].text)
+            and toks[k + 1].text in {":", "-", "–", "—"}
+            and NUM_TOKEN_PAT.fullmatch(toks[k + 2].text)
+        ):
+            pairs.append((k, k + 2))
+            k += 3
+            continue
+        k += 1
+    return pairs
+
+
+def _cut_university(s: str) -> str:
+    up = s.upper()
+    # Hard stop tokens commonly appearing after the university name
+    hard_tokens = (
+        "TRANSCRIPT",
+        "EXPLANATION",
+        "GRADE",
+        "GRADES",
+        "REGISTRAR",
+        "OFFICE",
+        "PHONE",
+        "TEL",
+        "FAX",
+        "EMAIL",
+        "P.O.",
+        "PO BOX",
+        "BOX",
+        "WWW",
+        "HTTP",
+    )
+    cutpoints: list[int] = []
+    for tok in hard_tokens:
+        idx = up.find(tok)
+        if idx != -1:
+            cutpoints.append(idx)
+    # Also cut at the start of typical US phone numbers like (607) 753-4702 or 607-753-4702
+    import re as _re
+
+    m_phone = _re.search(r"\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}", s)
+    if m_phone:
+        cutpoints.append(m_phone.start())
+    if cutpoints:
+        s = s[: min(cutpoints)]
+    return s.strip(" -,:;")
 
 
 def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None]:
-    page1 = [r for r in rows if r.page == 1]
-    joined1 = " \n".join(_row_text(r) for r in page1)
+    window = [r for r in rows if r.page in (1, 2, 3, 4)]
+    joined = " \n".join(_row_text(r) for r in window)
+
     NAME_PATS = [
         re.compile(r"(?im)^\s*Record of:\s*(.+?)(?:\s*Page:.*$|$)"),
         re.compile(r"(?im)^\s*Issued To:\s*([A-Z][A-Z\s.\-']+)\b.*$"),
         re.compile(r"(?im)^\s*Student Name\s*:\s*(.+)$"),
         re.compile(r"(?im)^\s*Name\s*:\s*(.+)$"),
+        re.compile(
+            r"(?im)^\s*([A-Z][A-Za-z'.\-]+,\s+[A-Z][A-Za-z'.\-]+)\s+\d{2,3}[- ]?\d{2}[- ]?\d{4}\b"
+        ),
     ]
     student = None
     for pat in NAME_PATS:
-        m = pat.search(joined1)
+        m = pat.search(joined)
         if m:
             cand = m.group(1).strip()
             if "@" in cand:
@@ -240,49 +348,70 @@ def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None
             student = cand.strip(" ,;")
             break
 
-    UNIV_KEYWORDS = ("UNIVERSITY", "COLLEGE", "INSTITUTE", "POLYTECHNIC", "COMMUNITY COLLEGE")
+    def is_label_value(s: str) -> bool:
+        return bool(re.search(r"^[A-Z][A-Za-z &/]+\s:\s", s))
 
-    def _cut_boiler(s: str) -> str:
+    candidates: list[str] = []
+    for r in window:
+        txt = _row_text(r).strip()
+        up = txt.upper()
+        if "INSTITUTION INFORMATION CONTINUED" in up or is_label_value(txt):
+            continue
+        if re.search(r"(?i)\b(UNIVERSITY|COLLEGE|INSTITUTE|POLYTECHNIC|COMMUNITY COLLEGE)\b", up):
+            cut = _cut_university(txt)
+            if 6 <= len(cut) <= 200:
+                candidates.append(cut)
+
+    full_name = None
+    base = next((c for c in candidates if "STATE UNIVERSITY OF NEW YORK" in c.upper()), None)
+    addon = next(
+        (c for c in candidates if "COLLEGE AT" in c.upper() or c.upper().endswith("CORTLAND")), None
+    )
+    if base and addon and addon not in base:
+        full_name = (base + " " + addon).strip()
+
+    def score(s: str) -> int:
         up = s.upper()
-        for tok in (
-            "TRANSCRIPT EXPLANATION",
-            "EXPLANATION OF GRADES",
-            "CREDENTIALS",
-            "REGISTRAR",
-            "PHONE",
-            "FAX",
-            "P.O.",
-        ):
-            if tok in up:
-                s = s[: up.find(tok)]
-                break
-        return re.sub(r"[,-]\s*$", "", s).strip(" -")
+        sc = 0
+        if "STATE UNIVERSITY OF NEW YORK" in up:
+            sc += 4
+        if "COLLEGE AT" in up:
+            sc += 3
+        if "CORTLAND" in up:
+            sc += 2
+        if "UNIVERSITY" in up:
+            sc += 2
+        if "COLLEGE" in up:
+            sc += 1
+        if 10 <= len(up) <= 90:
+            sc += 1
+        return sc
 
     university = None
-    for r in page1[:60]:
-        txt = _row_text(r)
-        up = txt.upper()
-        if any(k in up for k in UNIV_KEYWORDS) and not re.search(
-            r"(?i)^\s*[A-Z][A-Za-z &/]+\s:\s", txt
-        ):
-            cand = _cut_boiler(txt)
-            if 6 <= len(cand) <= 120:
-                university = cand
-                break
+    if full_name:
+        university = full_name
+    elif candidates:
+        candidates.sort(key=score, reverse=True)
+        university = candidates[0]
+
     return student, university
 
 
 def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
-    i = 0
     n = len(rows)
-    in_progress_seen = False  # restored flag: if we've seen "IN PROGRESS" anywhere
+    in_progress_seen_anywhere = False
+
+    def is_any_course_row(r: Row) -> bool:
+        return bool(_iter_code_pairs(r.toks))
+
+    i = 0
     while i < n:
         row = rows[i]
         txt = _row_text(row).strip()
         up = txt.upper()
-        if "IN PROGRESS" in up:
-            in_progress_seen = True
+        if INPROG_PAT.search(up):
+            in_progress_seen_anywhere = True
         if _is_admin_row(txt):
             i += 1
             continue
@@ -292,123 +421,221 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
             i += 1
             continue
 
-        # prefix + number patterns
-        prefix = None
-        number = None
-        num_idx = None
+        pairs = _iter_code_pairs(toks)
+        used_any = False
 
-        if re.fullmatch(r"[A-Za-z]{2,}", toks[0].text) and NUM_TOKEN_PAT.fullmatch(toks[1].text):
-            prefix = toks[0].text.upper()
-            number = toks[1].text.upper()
-            num_idx = 1
-        elif (
-            re.fullmatch(r"[A-Za-z]{2,}", toks[0].text)
-            and toks[1].text in {":", "-", "–", "—"}
-            and len(toks) >= 3
-            and NUM_TOKEN_PAT.fullmatch(toks[2].text)
-        ):
-            prefix = toks[0].text.upper()
-            number = toks[2].text.upper()
-            num_idx = 2
-
-        if prefix is None or prefix not in allowed or num_idx is None:
-            i += 1
-            continue
-
-        code = f"{prefix} {number}"
-        code_end_x = toks[num_idx].x1
-
-        # title tokens on this row (to the right of code)
-        title_tokens: list[str] = []
-        title_left_x: float | None = None
-        for t in toks[num_idx + 1 :]:
-            if t.x0 <= code_end_x + 1:
+        for pi, num_idx in pairs:
+            prefix = toks[pi].text.upper()
+            if prefix not in allowed:
                 continue
-            if _is_campus_token(t.text) or URL_PAT.search(t.text) or ADMIN_ROW.match(t.text):
-                continue
-            if re.fullmatch(r"\d+\.\d{2,3}", t.text):  # credits marker
-                break
-            if title_left_x is None:
-                title_left_x = t.x0
-            title_tokens.append(t.text)
+            used_any = True
+            number = toks[num_idx].text.upper()
+            code = f"{prefix} {number}"
+            code_x0 = toks[pi].x0
+            code_end_x = toks[num_idx].x1
 
-        # continuation: look ahead up to 3 rows; alignment tolerance ±40 (original baseline)
-        j = i + 1
-        joined_rows = 0
-        while j < n and joined_rows < 3:
-            next_row = rows[j]
-            ntext = _row_text(next_row).strip()
-            if _is_admin_row(ntext):
-                break
-            ntoks = next_row.toks
-            if (
-                len(ntoks) >= 2
-                and re.fullmatch(r"[A-Za-z]{2,}", ntoks[0].text)
-                and NUM_TOKEN_PAT.fullmatch(ntoks[1].text)
-            ):
-                break
+            title_tokens: list[str] = []
+            title_left_x: float | None = None
+            credits_x0: float | None = None
 
-            right_tokens = [t for t in ntoks if t.x0 > code_end_x + 1]
-            if not right_tokens:
-                j += 1
-                continue
-            first_right = right_tokens[0]
-            if title_left_x is not None and abs(first_right.x0 - title_left_x) > 40:
-                j += 1
-                continue
-            for t in right_tokens:
-                if title_left_x is not None and t.x0 + 0.1 < title_left_x - 1:
-                    continue
-                if _is_campus_token(t.text) or URL_PAT.search(t.text) or ADMIN_ROW.match(t.text):
-                    continue
-                if re.fullmatch(r"\d+\.\d{2,3}", t.text):
+            next_pair_x0 = None
+            for p2, _n2 in pairs:
+                if p2 > pi:
+                    next_pair_x0 = toks[p2].x0
                     break
+
+            def is_in_progress_phrase(ntoks: list[Tok], idx: int) -> bool:
+                return (
+                    idx + 1 < len(ntoks)
+                    and ntoks[idx].text.strip().upper() == "IN"
+                    and ntoks[idx + 1].text.strip().upper() == "PROGRESS"
+                )
+
+            right = toks[num_idx + 1 :]
+            for t_idx, t in enumerate(right):
+                if t.x0 <= code_end_x + 1:
+                    continue
+                if next_pair_x0 is not None and t.x0 >= next_pair_x0 - 1:
+                    break
+                if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
+                    continue
+                if (
+                    _is_stop_token(t.text)
+                    or LEVEL_TOKEN.fullmatch(t.text)
+                    or URL_PAT.search(t.text)
+                    or is_in_progress_phrase(right, t_idx)
+                ):
+                    break
+                if re.fullmatch(r"\d+\.\d{2,3}", t.text):
+                    credits_x0 = t.x0
+                    break
+                if title_left_x is None:
+                    title_left_x = t.x0
                 title_tokens.append(t.text)
-            joined_rows += 1
-            j += 1
 
-        title_raw = " ".join(title_tokens).strip()
-        title = re.sub(GRADE_PAT, "", title_raw).strip(" -:;,")
+            j = i + 1
+            joined_rows = 0
+            while j < n and joined_rows < 3:
+                next_row = rows[j]
+                ntext = _row_text(next_row).strip()
+                if _is_admin_row(ntext) or is_any_course_row(next_row):
+                    break
+                ntoks = next_row.toks
+                right_tokens = [t for t in ntoks if t.x0 > code_end_x + 1]
+                if not right_tokens:
+                    j += 1
+                    continue
+                first_right = right_tokens[0]
+                if title_left_x is not None and abs(first_right.x0 - title_left_x) > 40:
+                    break
+                stop_hit = False
+                for k, t in enumerate(right_tokens):
+                    if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
+                        continue
+                    if (
+                        _is_stop_token(t.text)
+                        or LEVEL_TOKEN.fullmatch(t.text)
+                        or URL_PAT.search(t.text)
+                    ):
+                        stop_hit = True
+                        break
+                    if k + 1 < len(right_tokens):
+                        a = t.text.strip().upper()
+                        b = right_tokens[k + 1].text.strip().upper()
+                        if a == "IN" and b == "PROGRESS":
+                            stop_hit = True
+                            break
+                    if re.fullmatch(r"\d+\.\d{2,3}", t.text):
+                        credits_x0 = credits_x0 or t.x0
+                        stop_hit = True
+                        break
+                    title_tokens.append(t.text)
+                if stop_hit:
+                    break
+                joined_rows += 1
+                j += 1
 
-        # grade: original behavior that yielded IN PROGRESS for certain rows
-        # scan only a small window (this row + next 3), otherwise defer to in_progress_seen
-        scan_text = txt
-        k = i + 1
-        seen_rows = 0
-        while k < n and seen_rows < 3:
-            if (
-                len(rows[k].toks) >= 2
-                and re.fullmatch(r"[A-Za-z]{2,}", rows[k].toks[0].text)
-                and NUM_TOKEN_PAT.fullmatch(rows[k].toks[1].text)
-            ):
-                break
-            scan_text += " " + _row_text(rows[k])
-            seen_rows += 1
-            k += 1
-        mg = GRADE_PAT.search(scan_text)
-        if mg:
-            grade = mg.group(1).upper()
-        elif "IN PROGRESS" in scan_text.upper() or in_progress_seen:
-            grade = "IN PROGRESS"
-        else:
-            grade = "none"
+            title = " ".join(title_tokens).strip(" -:;,")
 
-        out.append((code, title, grade))
+            def strict_grade_right_of_credits(start_row: Row) -> str | None:
+                if credits_x0 is None:
+                    return None
+                region_tokens = [
+                    t
+                    for t in start_row.toks
+                    if t.x0 > credits_x0 - 1 and not LEVEL_TOKEN.fullmatch(t.text)
+                ]
+                for t in region_tokens:
+                    if GRADE_TOKEN_STRICT.fullmatch(t.text):
+                        return t.text.upper().replace("\u2212", "-")
+                joined = " ".join(t.text for t in region_tokens).upper().replace("\u2212", "-")
+                if "IN PROGRESS" in joined:
+                    return "IN PROGRESS"
+                m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", joined)
+                if m:
+                    return (m.group(1) + (m.group(2) or "")).upper()
+                for t in region_tokens:
+                    if GRADE_TOKEN_LOOSE.fullmatch(t.text):
+                        return t.text.upper()
+                return None
+
+            def grade_left_of_code(start_row: Row) -> str | None:
+                left_tokens = [t for t in start_row.toks if t.x1 < code_x0 - 1]
+                ignore = {
+                    "GRD",
+                    "GR",
+                    "CR",
+                    "CRED",
+                    "CRED:",
+                    "CREDIT",
+                    "CREDITS",
+                    "PTS",
+                    "R",
+                    "HRS",
+                    "HOURS",
+                }
+                for t in left_tokens:
+                    if t.text.strip().upper().rstrip(":") in ignore:
+                        continue
+                    if GRADE_TOKEN_STRICT.fullmatch(t.text):
+                        return t.text.upper().replace("\u2212", "-")
+                joined_left = " ".join(t.text for t in left_tokens).upper().replace("\u2212", "-")
+                if "IN PROGRESS" in joined_left:
+                    return "IN PROGRESS"
+                m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", joined_left)
+                if m:
+                    return (m.group(1) + (m.group(2) or "")).upper()
+                for t in left_tokens:
+                    if GRADE_TOKEN_LOOSE.fullmatch(t.text):
+                        return t.text.upper()
+                return None
+
+            grade = strict_grade_right_of_credits(row) or grade_left_of_code(row)
+            if not grade:
+                window = (
+                    " ".join(_row_text(r) for r in rows[i : i + 3]).upper().replace("\u2212", "-")
+                )
+                if "IN PROGRESS" in window:
+                    grade = "IN PROGRESS"
+                else:
+                    m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", window)
+                    grade = (m.group(1) + (m.group(2) or "")).upper() if m else "none"
+
+            out.append((code, title, grade))
+
+        # Cross-row stitch (only if no allowed pair used on this row)
+        if not used_any:
+            if i + 1 < n and not _is_admin_row(_row_text(rows[i + 1])):
+                last = toks[-1]
+                if re.fullmatch(r"[A-Za-z]{2,}", last.text):
+                    ntoks = rows[i + 1].toks
+                    if ntoks and NUM_TOKEN_PAT.fullmatch(ntoks[0].text):
+                        prefix = last.text.upper()
+                        number = ntoks[0].text.upper()
+                        if prefix in allowed:
+                            code = f"{prefix} {number}"
+                            code_end_x = ntoks[0].x1
+                            credits_x0 = None
+                            title_tokens = []
+                            for t in ntoks[1:]:
+                                if t.x0 <= code_end_x + 1:
+                                    continue
+                                if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
+                                    continue
+                                if (
+                                    _is_stop_token(t.text)
+                                    or LEVEL_TOKEN.fullmatch(t.text)
+                                    or URL_PAT.search(t.text)
+                                ):
+                                    break
+                                if re.fullmatch(r"\d+\.\d{2,3}", t.text):
+                                    credits_x0 = t.x0
+                                    break
+                                title_tokens.append(t.text)
+                            title = " ".join(title_tokens).strip(" -:;,")
+                            grade = None
+                            if credits_x0 is not None:
+                                reg = [
+                                    t
+                                    for t in ntoks
+                                    if t.x0 > credits_x0 - 1 and not LEVEL_TOKEN.fullmatch(t.text)
+                                ]
+                                for t in reg:
+                                    if GRADE_TOKEN_STRICT.fullmatch(t.text):
+                                        grade = t.text.upper().replace("\u2212", "-")
+                                        break
+                                if (
+                                    not grade
+                                    and "IN PROGRESS" in " ".join(t.text for t in reg).upper()
+                                ):
+                                    grade = "IN PROGRESS"
+                            out.append((code, title, grade or "none"))
+
         i += 1
 
+    if in_progress_seen_anywhere:
+        out = [(c, t, g if g != "none" else "IN PROGRESS") for (c, t, g) in out]
     return out
-
-
-def _extract_rows(path: Path, prefer_ocr: bool = False) -> tuple[list[Row], bool]:
-    """Try pdfplumber first; if no rows (or forced), try OCR fallback."""
-    force_ocr = prefer_ocr or os.environ.get("TRANSCRIPT_FORCE_OCR", "").strip() == "1"
-    rows_pdf: list[Row] = [] if force_ocr else _extract_rows_pdfplumber(path)
-    if rows_pdf:
-        return rows_pdf, False
-    rows_ocr = _extract_rows_ocr(path)
-    if rows_ocr:
-        return rows_ocr, True
-    return [], False
 
 
 def run_file(
@@ -448,7 +675,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  Student: {student or '(unknown)'}")
         print(f"  University: {university or '(unknown)'}")
 
-        # sort by numeric course number
         def sort_key(code: str):
             m = re.search(r"(\d{3,4})([A-Z]?)$", code)
             return (int(m.group(1)) if m else 9999, m.group(2) if m else "")
@@ -456,9 +682,10 @@ def main(argv: list[str] | None = None) -> None:
         seen = set()
         entries: list[tuple[tuple[int, str], str]] = []
         for code, title, grade in matches:
-            if (code, grade) in seen:
+            key = (code, title, grade)
+            if key in seen:
                 continue
-            seen.add((code, grade))
+            seen.add(key)
             entries.append((sort_key(code), f"  {code} — {title} — grade: {grade}"))
 
         if not entries:
