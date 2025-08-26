@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Pattern, Sequence, Set
+from re import Pattern
 
 try:
     import pdfplumber  # type: ignore
@@ -24,7 +25,7 @@ class Token:
 @dataclass
 class Row:
     y: float
-    toks: List[Token]
+    toks: list[Token]
 
 
 def _to_str(v: object) -> str:
@@ -39,10 +40,10 @@ def _to_float(v: object, default: float = 0.0) -> float:
         return default
 
 
-def parse_pages_arg(p: Optional[str]) -> Optional[Set[int]]:
+def parse_pages_arg(p: str | None) -> set[int] | None:
     if not p:
         return None
-    parts: List[int] = []
+    parts: list[int] = []
     for chunk in p.split(","):
         chunk_s = chunk.strip()
         if not chunk_s:
@@ -63,9 +64,9 @@ def parse_pages_arg(p: Optional[str]) -> Optional[Set[int]]:
     return set(parts)
 
 
-def group_words_into_rows(words: Sequence[dict], y_tol: float = 3.0) -> List[Row]:  # type: ignore[type-arg]
-    rows: List[Row] = []
-    cur: Optional[Row] = None
+def group_words_into_rows(words: Sequence[dict], y_tol: float = 3.0) -> list[Row]:  # type: ignore[type-arg]
+    rows: list[Row] = []
+    cur: Row | None = None
     for w in words:
         t = _to_str(w.get("text"))
         if not t:
@@ -107,7 +108,7 @@ def main() -> None:
         return
 
     page_set = parse_pages_arg(args.pages)
-    rx: Optional[Pattern[str]] = re.compile(args.grep, re.I) if args.grep else None
+    rx: Pattern[str] | None = re.compile(args.grep, re.I) if args.grep else None
 
     with pdfplumber.open(path) as pdf:  # type: ignore[misc]
         for pidx, page in enumerate(pdf.pages, start=1):  # type: ignore[attr-defined]
