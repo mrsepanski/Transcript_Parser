@@ -34,7 +34,7 @@ def _lazy_import_paddle():
 
 # ---------- Subject aliases ----------
 SUBJECT_ALIASES = {
-    "math": ["MATH", "MAT", "MTH", "MA", "MATG", "MAS", "MAP"],
+    "math": ["MATH", "MAT", "MTH", "MA", "MATG", "MAS", "MAP", "STA", "STAT"],
     "stat": ["STAT", "STA"],
     "cs": ["CS", "CSC", "CSCI", "CSE", "COSC"],
     "physics": ["PHYS", "PHY"],
@@ -88,6 +88,24 @@ STOP_TOKENS = {
     "REGISTRAR’S",
     "REGISTRAR'S",
     "OFFICE",
+}
+
+# Additional "pre-title" tokens often appearing between code and title
+# (campus, delivery mode, or institution codes). We skip these until actual title begins.
+PRETITLE_TOKENS = {
+    "MAIN",
+    "CAMPUS",
+    "CAMPUS-",
+    "ONLINE",
+    "REMOTE",
+    "DISTANCE",
+    "LEARNING",
+    "DL",
+    "HYBRID",
+    "UNF",
+    "UTK",
+    "UNIV",
+    "COL",
 }
 
 LEVEL_TOKEN = re.compile(r"(?i)^(UG|GR|G|U)$")  # program level markers, not grades
@@ -313,9 +331,7 @@ def _cut_university(s: str) -> str:
         if idx != -1:
             cutpoints.append(idx)
     # Also cut at the start of typical US phone numbers like (607) 753-4702 or 607-753-4702
-    import re as _re
-
-    m_phone = _re.search(r"\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}", s)
+    m_phone = re.search(r"\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}", s)
     if m_phone:
         cutpoints.append(m_phone.start())
     if cutpoints:
@@ -397,10 +413,44 @@ def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None
     return student, university
 
 
+def _looks_like_title_word(s: str) -> bool:
+    """Heuristic: a real title word often contains lowercase or is a long alpha token."""
+    if any(ch.islower() for ch in s):
+        return True
+    # e.g., 'CRYPTOGRAPHY' (all caps) should still be okay
+    return s.isalpha() and len(s) >= 5
+
+
+def _clean_title_prefix(s: str) -> str:
+    # Remove common catalog prefixes like 'ST:', 'TOPICS:', etc.
+    s = re.sub(r"(?i)^(ST|SPECIAL\s+TOPICS|SELECTED\s+TOPICS|TOPICS)\s*[:\-]\s*", "", s).strip()
+    return s
+
+
+def _title_column_x_per_page(rows: list[Row]) -> dict[int, float]:
+    """
+    Detect the x0 of the 'Title' column header per page, if present.
+    Returns a dict mapping page -> x0 for 'Title' token.
+    """
+    title_x: dict[int, float] = {}
+    for r in rows:
+        txt = _row_text(r).upper()
+        if "SUBJECT" in txt and "TITLE" in txt and "GRADE" in txt:
+            # look for the specific token 'Title' to get its x0
+            for t in r.toks:
+                if t.text.strip().upper() == "TITLE":
+                    title_x[r.page] = t.x0
+                    break
+    return title_x
+
+
 def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     n = len(rows)
     in_progress_seen_anywhere = False
+
+    # Precompute title header x0 per page (used to filter out Campus/Level columns)
+    title_x_map = _title_column_x_per_page(rows)
 
     def is_any_course_row(r: Row) -> bool:
         return bool(_iter_code_pairs(r.toks))
@@ -423,6 +473,7 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
 
         pairs = _iter_code_pairs(toks)
         used_any = False
+        title_min_x = title_x_map.get(row.page, None)
 
         for pi, num_idx in pairs:
             prefix = toks[pi].text.upper()
@@ -451,7 +502,9 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                     and ntoks[idx + 1].text.strip().upper() == "PROGRESS"
                 )
 
+            # ----- same row title scan -----
             right = toks[num_idx + 1 :]
+            started_title = False
             for t_idx, t in enumerate(right):
                 if t.x0 <= code_end_x + 1:
                     continue
@@ -459,20 +512,39 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                     break
                 if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
                     continue
+                up_tok = t.text.strip().upper()
                 if (
                     _is_stop_token(t.text)
                     or LEVEL_TOKEN.fullmatch(t.text)
                     or URL_PAT.search(t.text)
                     or is_in_progress_phrase(right, t_idx)
+                ) and started_title:
+                    break
+                if started_title and (
+                    GRADE_TOKEN_STRICT.fullmatch(t.text) or GRADE_TOKEN_LOOSE.fullmatch(t.text)
                 ):
                     break
+                # Skip campus/mode/level *before* the title begins
+                if not started_title and (
+                    up_tok in PRETITLE_TOKENS or LEVEL_TOKEN.fullmatch(t.text)
+                ):
+                    continue
+                # Enforce a minimum x0 at the Title header, if known
+                if title_min_x is not None and t.x0 < title_min_x - 1:
+                    continue
+                # detect credits position
                 if re.fullmatch(r"\d+\.\d{2,3}", t.text):
                     credits_x0 = t.x0
                     break
                 if title_left_x is None:
                     title_left_x = t.x0
+                if not started_title:
+                    started_title = _looks_like_title_word(t.text)
+                    if not started_title and up_tok in {"ST", "ST:"}:
+                        continue
                 title_tokens.append(t.text)
 
+            # ----- stitch next rows: keep tokens aligned with Title column -----
             j = i + 1
             joined_rows = 0
             while j < n and joined_rows < 3:
@@ -482,6 +554,19 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                     break
                 ntoks = next_row.toks
                 right_tokens = [t for t in ntoks if t.x0 > code_end_x + 1]
+                # Filter to Title column (if known)
+                if title_min_x is not None:
+                    right_tokens = [t for t in right_tokens if t.x0 >= title_min_x - 1]
+                # Keep only tokens aligned with the initial title column
+                aligned = []
+                if title_left_x is not None:
+                    for t in right_tokens:
+                        if abs(t.x0 - title_left_x) <= 24.0:
+                            aligned.append(t)
+                if not aligned:
+                    break
+                if title_min_x is not None:
+                    right_tokens = [t for t in right_tokens if t.x0 >= title_min_x - 1]
                 if not right_tokens:
                     j += 1
                     continue
@@ -489,13 +574,15 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                 if title_left_x is not None and abs(first_right.x0 - title_left_x) > 40:
                     break
                 stop_hit = False
-                for k, t in enumerate(right_tokens):
+                for k, t in enumerate(aligned):
                     if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
                         continue
                     if (
                         _is_stop_token(t.text)
                         or LEVEL_TOKEN.fullmatch(t.text)
                         or URL_PAT.search(t.text)
+                        or GRADE_TOKEN_STRICT.fullmatch(t.text)
+                        or GRADE_TOKEN_LOOSE.fullmatch(t.text)
                     ):
                         stop_hit = True
                         break
@@ -516,6 +603,7 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                 j += 1
 
             title = " ".join(title_tokens).strip(" -:;,")
+            title = _clean_title_prefix(title)
 
             def strict_grade_right_of_credits(start_row: Row) -> str | None:
                 if credits_x0 is None:
@@ -531,7 +619,8 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                 joined = " ".join(t.text for t in region_tokens).upper().replace("\u2212", "-")
                 if "IN PROGRESS" in joined:
                     return "IN PROGRESS"
-                m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", joined)
+                # regex variant that preserves +/- even with spaces
+                m = re.search(r"(?<!\w)(A|B|C|D|F)\s*([+\-])?(?!\w)", joined)
                 if m:
                     return (m.group(1) + (m.group(2) or "")).upper()
                 for t in region_tokens:
@@ -562,7 +651,7 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                 joined_left = " ".join(t.text for t in left_tokens).upper().replace("\u2212", "-")
                 if "IN PROGRESS" in joined_left:
                     return "IN PROGRESS"
-                m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", joined_left)
+                m = re.search(r"(?<!\w)(A|B|C|D|F)\s*([+\-])?(?!\w)", joined_left)
                 if m:
                     return (m.group(1) + (m.group(2) or "")).upper()
                 for t in left_tokens:
@@ -575,10 +664,11 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                 window = (
                     " ".join(_row_text(r) for r in rows[i : i + 3]).upper().replace("\u2212", "-")
                 )
+                # preserve +/- even with spaces
                 if "IN PROGRESS" in window:
                     grade = "IN PROGRESS"
                 else:
-                    m = re.search(r"\b(A|B|C|D|F)([+\-])?\b", window)
+                    m = re.search(r"(?<!\w)(A|B|C|D|F)\s*([+\-])?(?!\w)", window)
                     grade = (m.group(1) + (m.group(2) or "")).upper() if m else "none"
 
             out.append((code, title, grade))
@@ -597,9 +687,13 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                             code_end_x = ntoks[0].x1
                             credits_x0 = None
                             title_tokens = []
+                            started_title = False
+                            x_title_left: float | None = None
+                            title_min_x = title_x_map.get(rows[i + 1].page, None)
                             for t in ntoks[1:]:
                                 if t.x0 <= code_end_x + 1:
                                     continue
+                                up_tok = t.text.strip().upper()
                                 if t.text.strip().upper() in FLAG_SINGLE_LETTERS:
                                     continue
                                 if (
@@ -608,11 +702,20 @@ def _scan_rows_for_courses(rows: list[Row], allowed: set[str]) -> list[tuple[str
                                     or URL_PAT.search(t.text)
                                 ):
                                     break
+                                if title_min_x is not None and t.x0 < title_min_x - 1:
+                                    continue
                                 if re.fullmatch(r"\d+\.\d{2,3}", t.text):
                                     credits_x0 = t.x0
                                     break
+                                if x_title_left is None:
+                                    x_title_left = t.x0
+                                if not started_title:
+                                    started_title = _looks_like_title_word(t.text)
+                                    if not started_title and up_tok in {"ST", "ST:"}:
+                                        continue
                                 title_tokens.append(t.text)
                             title = " ".join(title_tokens).strip(" -:;,")
+                            title = _clean_title_prefix(title)
                             grade = None
                             if credits_x0 is not None:
                                 reg = [
