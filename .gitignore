@@ -75,3 +75,6 @@ Test_Files/
 
 # Windows ADS sidecars
 *:[Zz]one.Identifier
+
+# Ignore Windows ADS sidecars
+*:Zone.Identifier
