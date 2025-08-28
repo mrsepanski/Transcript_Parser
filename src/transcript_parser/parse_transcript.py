@@ -88,6 +88,13 @@ STOP_TOKENS = {
     "REGISTRAR’S",
     "REGISTRAR'S",
     "OFFICE",
+    # Transfer/placement markers that should stop title scanning
+    "TCR",
+    "TA",
+    "TB",
+    "TC",
+    "TD",
+    "TF",
 }
 
 # Additional "pre-title" tokens often appearing between code and title
@@ -339,6 +346,20 @@ def _cut_university(s: str) -> str:
     return s.strip(" -,:;")
 
 
+def _clean_student_name(s: str | None) -> str | None:
+    """Remove trailing Banner-style IDs in parentheses, emails, and stray punctuation."""
+    if not s:
+        return s
+    # Drop email if present
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    # Remove trailing parenthetical containing any digits (e.g., (730000018,T02302164))
+    s = re.sub(r"\s*\((?=[^)]*[0-9])[^)]*\)\s*$", "", s)
+    # Normalize spaces and strip commas/semicolons
+    s = re.sub(r"\s{2,}", " ", s).strip(" ,;")
+    return s or None
+
+
 def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None]:
     window = [r for r in rows if r.page in (1, 2, 3, 4)]
     joined = " \n".join(_row_text(r) for r in window)
@@ -409,6 +430,9 @@ def _extract_student_university(rows: list[Row]) -> tuple[str | None, str | None
     elif candidates:
         candidates.sort(key=score, reverse=True)
         university = candidates[0]
+
+    # Final cleanup for student (strip trailing IDs, emails, etc.)
+    student = _clean_student_name(student)
 
     return student, university
 
@@ -774,6 +798,9 @@ def main(argv: list[str] | None = None) -> None:
         matches, (student, university), ocr_used = run_file(
             p, args.subjects, prefer_ocr=args.force_ocr
         )
+
+        # Final presentation cleanup for student (safety net)
+        student = _clean_student_name(student)
 
         print(f"  Student: {student or '(unknown)'}")
         print(f"  University: {university or '(unknown)'}")
